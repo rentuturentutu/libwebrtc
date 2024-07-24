@@ -9,7 +9,38 @@
 namespace libwebrtc {
 RTCRtpSenderImpl::RTCRtpSenderImpl(
     rtc::scoped_refptr<webrtc::RtpSenderInterface> rtp_sender)
-    : rtp_sender_(rtp_sender) {}
+    : rtp_sender_(rtp_sender) {
+
+  // 获取 sender 的参数对象
+  auto parms = parameters();
+
+  // 设置传输质量偏好
+  parms->SetDegradationPreference(RTCDegradationPreference::MAINTAIN_RESOLUTION);
+
+  // 创建编码参数对象
+  scoped_refptr<libwebrtc::RTCRtpEncodingParameters> encoding =
+      RTCRtpEncodingParameters::Create();
+
+
+  encoding->set_max_bitrate_bps(1024 * 1024 * 20); // 设置最大比特率为 1Mbps
+  encoding->set_min_bitrate_bps(1024 * 1024 * 1);
+  encoding->set_max_framerate(60); // 设置最大帧率为 30fps
+  encoding->set_num_temporal_layers(3);
+  encoding->set_active(true);
+  encoding->set_network_priority(RTCPriority::kMedium);
+
+  // 将编码参数添加到向量中
+  // std::vector<RTCRtpEncodingParameters> encodings;
+  // encodings.push_back(*(encoding.get()));
+  std::vector<scoped_refptr<RTCRtpEncodingParameters>> encodings;
+  encodings.push_back(encoding);
+
+  // 将编码参数应用到参数对象中
+  parms->set_encodings(encodings);
+
+  set_parameters(parms);
+
+}
 
 bool RTCRtpSenderImpl::set_track(scoped_refptr<RTCMediaTrack> track) {
   if (track == nullptr) {

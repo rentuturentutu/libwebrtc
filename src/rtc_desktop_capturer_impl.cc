@@ -49,8 +49,9 @@ RTCDesktopCapturerImpl::RTCDesktopCapturerImpl(
 #endif
   thread_->BlockingCall([this, type] {
     if (type == kScreen) {
-      capturer_ = std::make_unique<webrtc::DesktopAndCursorComposer>(
-          webrtc::DesktopCapturer::CreateScreenCapturer(options_), options_);
+      // capturer_ = std::make_unique<webrtc::DesktopAndCursorComposer>(
+      //     webrtc::DesktopCapturer::CreateScreenCapturer(options_), options_);
+      capturer_ = webrtc::DesktopAndCursorComposer::CreateWithoutMouseCursorMonitor(webrtc::DesktopCapturer::CreateScreenCapturer(options_));
     } else {
       capturer_ = std::make_unique<webrtc::DesktopAndCursorComposer>(
           webrtc::DesktopCapturer::CreateWindowCapturer(options_), options_);
