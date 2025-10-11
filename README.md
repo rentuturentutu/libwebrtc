@@ -1,6 +1,7 @@
 # libwebrtc-{windows,linux}-{amd64,x86,armv7,arm64}.{dll,so}
 
 WebRTC C++ wrapper
+
 A C++ binary wrapper for webrtc, mainly used for flutter-webrtc desktop (windows, linux, embedded) version release.
 
 possible supported platforms
@@ -75,7 +76,7 @@ index e60d7dd0bd..b9b6acab8b 100644
 Download and install the Visual Studio Community 2022
 
 ### GN
-
+for windows only
 ```bash
 set DEPOT_TOOLS_WIN_TOOLCHAIN=0
 set GYP_MSVS_VERSION=2022
@@ -92,6 +93,7 @@ ninja -C out-debug/Windows-x64 libwebrtc
 ```
 
 ## for Linux
+you need back to step `Create .gclient`, and change `target_os  = ['win']` to `target_os  = ['linux']`, then run `gclient sync`
 ```bash
 export ARCH=x64 # x86, x64, arm, arm64
 gn gen out-debug/Linux-$ARCH --args="target_os=\"linux\" target_cpu=\"$ARCH\" is_debug=true rtc_include_tests=false rtc_use_h264=true ffmpeg_branding=\"Chrome\" is_component_build=false use_rtti=true use_custom_libcxx=false rtc_enable_protobuf=false"
