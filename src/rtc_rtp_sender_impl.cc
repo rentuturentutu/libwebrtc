@@ -15,19 +15,29 @@ RTCRtpSenderImpl::RTCRtpSenderImpl(
   auto parms = parameters();
 
   // 设置传输质量偏好
-  parms->SetDegradationPreference(RTCDegradationPreference::MAINTAIN_RESOLUTION);
+  parms->SetDegradationPreference(RTCDegradationPreference::MAINTAIN_FRAMERATE);
+  // parms->SetDegradationPreference(RTCDegradationPreference::MAINTAIN_RESOLUTION);
 
   // 创建编码参数对象
   scoped_refptr<libwebrtc::RTCRtpEncodingParameters> encoding =
       RTCRtpEncodingParameters::Create();
 
+   encoding->set_max_bitrate_bps(1024 * 1024 * 50); // 设置最大比特率为 1Mbps
+    encoding->set_min_bitrate_bps(1024 * 1024 * 10);
+    encoding->set_max_framerate(30); // 设置最大帧率为 30fps
+    encoding->set_num_temporal_layers(3);
+    encoding->set_active(true);
+    encoding->set_network_priority(RTCPriority::kHigh);
+    encoding->set_scalability_mode("L1T1");    
 
-  encoding->set_max_bitrate_bps(1024 * 1024 * 20); // 设置最大比特率为 1Mbps
-  encoding->set_min_bitrate_bps(1024 * 1024 * 1);
-  encoding->set_max_framerate(60); // 设置最大帧率为 30fps
-  encoding->set_num_temporal_layers(3);
-  encoding->set_active(true);
-  encoding->set_network_priority(RTCPriority::kMedium);
+
+  // encoding->set_max_bitrate_bps(1024 * 1024 * 30);
+  // encoding->set_min_bitrate_bps(1024 * 1024 * 5);
+  // encoding->set_max_framerate(30); // 设置最大帧率为 30fps
+  // encoding->set_num_temporal_layers(3);
+  // encoding->set_active(true);
+  // encoding->set_network_priority(RTCPriority::kHigh);
+  // encoding->set_scalability_mode("L1T1");
 
   // 将编码参数添加到向量中
   // std::vector<RTCRtpEncodingParameters> encodings;
