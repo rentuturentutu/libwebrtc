@@ -46,6 +46,10 @@ class RTCPeerConnectionFactoryImpl : public RTCPeerConnectionFactory {
   virtual scoped_refptr<RTCVideoSource> CreateVideoSource(
       scoped_refptr<RTCVideoCapturer> capturer, const string video_source_label,
       scoped_refptr<RTCMediaConstraints> constraints) override;
+
+  virtual scoped_refptr<RTCVideoCapturer> CreateExternalVideoCapturer(
+      const string label, uint32_t width, uint32_t height,
+      uint32_t target_fps) override;
 #ifdef RTC_DESKTOP_DEVICE
   virtual scoped_refptr<RTCDesktopDevice> GetDesktopDevice() override;
   virtual scoped_refptr<RTCVideoSource> CreateDesktopSource(

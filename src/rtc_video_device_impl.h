@@ -6,6 +6,7 @@
 #include "modules/video_capture/video_capture.h"
 #include "rtc_base/thread.h"
 #include "rtc_video_device.h"
+#include "src/internal/external_capturer.h"
 #include "src/internal/vcm_capturer.h"
 #include "src/internal/video_capturer.h"
 
@@ -34,6 +35,68 @@ class RTCVideoCapturerImpl : public RTCVideoCapturer {
 
  private:
   std::shared_ptr<webrtc::internal::VideoCapturer> video_capturer_;
+};
+
+// Capturer whose frames come from the host application. Derives from
+// RTCVideoCapturerImpl so the static_cast in
+// RTCPeerConnectionFactoryImpl::CreateVideoSource_s stays valid and the
+// existing CreateVideoSource path can be reused unchanged.
+class RTCExternalVideoCapturerImpl : public RTCVideoCapturerImpl {
+ public:
+  explicit RTCExternalVideoCapturerImpl(
+      std::shared_ptr<webrtc::internal::ExternalCapturer> capturer)
+      : RTCVideoCapturerImpl(capturer), external_capturer_(capturer) {}
+
+  bool PushFrameBGRA(const uint8_t* data, int stride, int width, int height,
+                     int64_t timestamp_us) override {
+    return external_capturer_ != nullptr &&
+           external_capturer_->PushFrameBGRA(data, stride, width, height,
+                                            timestamp_us);
+  }
+
+  bool PushFrameI420(const uint8_t* data_y, int stride_y, const uint8_t* data_u,
+                     int stride_u, const uint8_t* data_v, int stride_v,
+                     int width, int height, int64_t timestamp_us) override {
+    return external_capturer_ != nullptr &&
+           external_capturer_->PushFrameI420(data_y, stride_y, data_u, stride_u,
+                                             data_v, stride_v, width, height,
+                                             timestamp_us);
+  }
+
+  bool PushFrameTexture(void* device, void* texture, void* shared_handle,
+                        int64_t luid, int width, int height,
+                        int64_t timestamp_us, void* lease,
+                        TextureReleaseCallback release) override {
+#if defined(USE_DGJ_HWCODEC)
+    return external_capturer_ != nullptr &&
+           external_capturer_->PushFrameTexture(
+               device, texture, shared_handle, luid, width, height,
+               timestamp_us, lease, release);
+#else
+    return false;
+#endif
+  }
+
+  void SetMaxFramerateObserver(MaxFramerateObserver observer,
+                               void* user) override {
+    if (external_capturer_ != nullptr) {
+      external_capturer_->SetMaxFramerateObserver(observer, user);
+    }
+  }
+
+  bool StartTestPattern() override {
+    return external_capturer_ != nullptr &&
+           external_capturer_->StartTestPattern();
+  }
+
+  void StopTestPattern() override {
+    if (external_capturer_ != nullptr) external_capturer_->StopTestPattern();
+  }
+
+  bool IsScreencast() const override { return true; }
+
+ private:
+  std::shared_ptr<webrtc::internal::ExternalCapturer> external_capturer_;
 };
 
 class RTCVideoDeviceImpl : public RTCVideoDevice {

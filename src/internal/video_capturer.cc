@@ -68,6 +68,14 @@ void VideoCapturer::RemoveSink(rtc::VideoSinkInterface<VideoFrame>* sink) {
   UpdateVideoAdapter();
 }
 
+void VideoCapturer::ProcessConstraints(
+    const VideoTrackSourceConstraints& constraints) {
+  // VideoBroadcaster is thread safe and caches the last constraints, replaying
+  // them to sinks that attach later, so the call order relative to the encoder
+  // attaching does not matter.
+  broadcaster_.ProcessConstraints(constraints);
+}
+
 void VideoCapturer::UpdateVideoAdapter() {
   rtc::VideoSinkWants wants = broadcaster_.wants();
 
@@ -79,6 +87,10 @@ void VideoCapturer::UpdateVideoAdapter() {
   } else {
     video_adapter_.OnSinkWants(wants);
   }
+
+  // Let a subclass throttle its grabber instead of relying solely on the
+  // adapter dropping frames after the fact.
+  OnMaxFramerateChanged(wants.max_framerate_fps);
 }
 
 }  // namespace internal

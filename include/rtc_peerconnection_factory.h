@@ -43,6 +43,13 @@ class RTCPeerConnectionFactory : public RefCountInterface {
   virtual scoped_refptr<RTCVideoSource> CreateVideoSource(
       scoped_refptr<RTCVideoCapturer> capturer, const string video_source_label,
       scoped_refptr<RTCMediaConstraints> constraints) = 0;
+
+  // Creates a capturer whose frames are pushed in by the host application via
+  // RTCVideoCapturer::PushFrameBGRA / PushFrameI420. Pass the result to
+  // CreateVideoSource like any other capturer.
+  virtual scoped_refptr<RTCVideoCapturer> CreateExternalVideoCapturer(
+      const string label, uint32_t width, uint32_t height,
+      uint32_t target_fps) = 0;
 #ifdef RTC_DESKTOP_DEVICE
   virtual scoped_refptr<RTCVideoSource> CreateDesktopSource(
       scoped_refptr<RTCDesktopCapturer> capturer,

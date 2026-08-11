@@ -1,6 +1,9 @@
 #include "rtc_video_frame_impl.h"
 
+#include <dxgi.h>
+
 #include "api/video/i420_buffer.h"
+#include "libwebrtc/src/dgj/dgj_texture_buffer.h"
 #include "libyuv/convert_argb.h"
 #include "libyuv/convert_from.h"
 #include "rtc_base/checks.h"
@@ -51,6 +54,30 @@ int VideoFrameBufferImpl::StrideU() const {
 
 int VideoFrameBufferImpl::StrideV() const {
   return buffer_->GetI420()->StrideV();
+}
+
+void* VideoFrameBufferImpl::D3D11SharedHandle() const {
+  if (!buffer_ || buffer_->type() != webrtc::VideoFrameBuffer::Type::kNative) {
+    return nullptr;
+  }
+
+  // DGJ is the only native VideoFrameBuffer producer in this Windows build.
+  // Its decode/capture textures are BGRA and D3D11_RESOURCE_MISC_SHARED.
+  auto* native = static_cast<DgjD3D11TextureBuffer*>(buffer_.get());
+  ID3D11Texture2D* texture = native->texture();
+  if (texture == nullptr) {
+    return nullptr;
+  }
+  IDXGIResource* resource = nullptr;
+  if (FAILED(texture->QueryInterface(
+          __uuidof(IDXGIResource), reinterpret_cast<void**>(&resource))) ||
+      resource == nullptr) {
+    return nullptr;
+  }
+  HANDLE handle = nullptr;
+  const HRESULT result = resource->GetSharedHandle(&handle);
+  resource->Release();
+  return SUCCEEDED(result) ? handle : nullptr;
 }
 
 int VideoFrameBufferImpl::ConvertToARGB(Type type, uint8_t* dst_buffer,

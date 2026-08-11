@@ -11,6 +11,7 @@
 #include "common_video/h264/h264_common.h"
 #include "libyuv/convert_from.h"
 #include "mfxcommon.h"
+#include "modules/video_coding/include/video_error_codes.h"
 #include "rtc_base/checks.h"
 #include "rtc_base/logging.h"
 #include "rtc_base/system/file_wrapper.h"
@@ -96,8 +97,9 @@ int MSDKVideoEncoder::InitEncode(const webrtc::VideoCodec* codec_settings,
   //     RTC_FROM_HERE,
   //     rtc::Bind(&MSDKVideoEncoder::InitEncodeOnEncoderThread, this,
   //               codec_settings, number_of_cores, max_payload_size));
-  return encoder_thread_->Invoke<int>(
-      RTC_FROM_HERE, [this, codec_settings, number_of_cores, max_payload_size] {
+  // 新版 webrtc 用 BlockingCall 替代了 Invoke<>(RTC_FROM_HERE, ...)
+  return encoder_thread_->BlockingCall(
+      [this, codec_settings, number_of_cores, max_payload_size] {
         return InitEncodeOnEncoderThread(codec_settings, number_of_cores,
                                          max_payload_size);
       });

@@ -44,6 +44,12 @@ class RTCVideoFrame : public RefCountInterface {
   virtual int StrideU() const = 0;
   virtual int StrideV() const = 0;
 
+  // Windows hardware decoders may keep the decoded BGRA frame in a shareable
+  // D3D11 texture. Returns its DXGI shared HANDLE as an opaque pointer, or
+  // nullptr for ordinary CPU-backed frames. The frame owns the texture and the
+  // handle is valid only while this RTCVideoFrame remains referenced.
+  virtual void* D3D11SharedHandle() const { return nullptr; }
+
   virtual int ConvertToARGB(Type type, uint8_t* dst_argb, int dst_stride_argb,
                             int dest_width, int dest_height) = 0;
 

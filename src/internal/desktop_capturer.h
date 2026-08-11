@@ -48,6 +48,34 @@ class ScreenCapturerTrackSource : public webrtc::VideoTrackSource {
     return static_cast<RTCDesktopCapturerImpl*>(capturer_.get());
   }
 
+  // 关键：标记为屏幕内容源。默认 VideoTrackSource::is_screencast() 返回 false，
+  // 导致编码器把桌面当普通摄像头视频处理（静止画面也满码率）。返回 true 后
+  // libwebrtc 启用 screen-content 码控：静止时码率大幅下降、只给变化区域花码率，
+  // 是降低公网码率/抖动的根治开关。
+  bool is_screencast() const override { return true; }
+
+  // 屏幕内容无需去噪（去噪是给摄像头噪点用的，对屏幕反而增加开销并模糊文字）。
+  absl::optional<bool> needs_denoising() const override { return false; }
+
+  // webrtc::VideoTrackSource 只把 AddOrUpdateSink/RemoveSink 转发给 source()，
+  // 下面两个接口都没有转发，落到基类空实现，因此必须在这里显式接线。
+
+  // 编码器侧 zero-hertz 适配器在丢帧后会请求刷新帧；不接这条链路的话画面会停
+  // 在旧内容不自动补帧。
+  void RequestRefreshFrame() override {
+    static_cast<RTCDesktopCapturerImpl*>(capturer_.get())
+        ->RequestRefreshFrame();
+  }
+
+  // 把采集器上报的 {min_fps=0, max_fps>0} 送到所有 sink，这是 zero-hertz 的激活
+  // 条件。采集器内部也会直接调，这里 override 是为了让应用层通过 track source
+  // 公共接口调用时同样生效。
+  void ProcessConstraints(
+      const webrtc::VideoTrackSourceConstraints& constraints) override {
+    static_cast<RTCDesktopCapturerImpl*>(capturer_.get())
+        ->ProcessConstraints(constraints);
+  }
+
   scoped_refptr<RTCDesktopCapturer> capturer_;
 };
 

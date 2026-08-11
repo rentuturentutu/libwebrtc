@@ -6,6 +6,26 @@
 #include <src/rtc_rtp_parameters_impl.h>
 #include <src/rtc_video_track_impl.h>
 
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
+#include <string>
+
+namespace {
+
+bool EnvEnabled(const char* name, bool default_value = true) {
+  char value[16] = {};
+  size_t length = 0;
+  if (getenv_s(&length, value, sizeof(value), name) != 0 || length == 0) {
+    return default_value;
+  }
+  std::string setting(value);
+  std::transform(setting.begin(), setting.end(), setting.begin(), ::tolower);
+  return setting != "0" && setting != "false" && setting != "off";
+}
+
+}  // namespace
+
 namespace libwebrtc {
 RTCRtpSenderImpl::RTCRtpSenderImpl(
     rtc::scoped_refptr<webrtc::RtpSenderInterface> rtp_sender)
@@ -14,30 +34,48 @@ RTCRtpSenderImpl::RTCRtpSenderImpl(
   // 获取 sender 的参数对象
   auto parms = parameters();
 
-  // 设置传输质量偏好
-  parms->SetDegradationPreference(RTCDegradationPreference::MAINTAIN_FRAMERATE);
-  // parms->SetDegradationPreference(RTCDegradationPreference::MAINTAIN_RESOLUTION);
+  // A hardware remote-desktop encoder owns its own mailbox/backpressure policy.
+  // WebRTC's CPU adaptation measures callback latency rather than actual CPU
+  // time, so one GPU completion tail was interpreted as CPU overload and
+  // permanently reduced a 32fps source to 10fps. Disable both resolution and
+  // framerate adaptation by default; the encoder already replaces stale frames
+  // instead of queueing them. Set DGJ_UU_FIXED_CADENCE=0 for the old
+  // MAINTAIN_RESOLUTION behaviour during A/B tests.
+  parms->SetDegradationPreference(
+      EnvEnabled("DGJ_UU_FIXED_CADENCE")
+          ? RTCDegradationPreference::DISABLED
+          : RTCDegradationPreference::MAINTAIN_RESOLUTION);
 
-  // 创建编码参数对象
   scoped_refptr<libwebrtc::RTCRtpEncodingParameters> encoding =
       RTCRtpEncodingParameters::Create();
 
-   encoding->set_max_bitrate_bps(1024 * 1024 * 50); // 设置最大比特率为 1Mbps
-    encoding->set_min_bitrate_bps(1024 * 1024 * 10);
-    encoding->set_max_framerate(30); // 设置最大帧率为 30fps
-    encoding->set_num_temporal_layers(3);
-    encoding->set_active(true);
-    encoding->set_network_priority(RTCPriority::kHigh);
-    encoding->set_scalability_mode("L1T1");    
+  // Keep native startup defaults aligned with the 1080p60 direct-UDP profile.
+  // Dart setParameters is rejected for this external source on Windows, so
+  // these values are the effective sender limits rather than just fallbacks.
+  // The old 32fps ceiling imposed a 31ms source period even though the shared
+  // texture NVENC path now submits in about 0.25ms with no queue growth.
+  encoding->set_max_bitrate_bps(40 * 1000 * 1000);
+  encoding->set_min_bitrate_bps(12 * 1000 * 1000);
+  encoding->set_max_framerate(60);
 
-
-  // encoding->set_max_bitrate_bps(1024 * 1024 * 30);
-  // encoding->set_min_bitrate_bps(1024 * 1024 * 5);
-  // encoding->set_max_framerate(30); // 设置最大帧率为 30fps
-  // encoding->set_num_temporal_layers(3);
-  // encoding->set_active(true);
-  // encoding->set_network_priority(RTCPriority::kHigh);
-  // encoding->set_scalability_mode("L1T1");
+  // The capture source runs at 64fps (60 * 1.07) to avoid phase drift against
+  // a 60Hz desktop. Keeping the sender at 60 discards only the cadence margin
+  // and preserves one encoded frame per display interval.
+  //
+  // Smoothness, separately, is not driven by this value at all. Three measured
+  // runs:
+  //   elevated peer  shown 28.5  dropped 14.6/window  -> user called it choppy
+  //   user-mode 40s  shown 29.4  dropped 11.9/window  -> user called it smooth
+  //   user-mode 150s shown 28.1  dropped 17.3/window  jitterBuffer 11.3ms
+  //                  (worst of the three)             -> user called it smooth
+  // So shown/dropped/assembly do not predict perceived smoothness. Chasing
+  // shown toward the 30fps display ceiling buys nothing.
+  //
+  // Only the sending side uses this; the controlling side has no video sender.
+  encoding->set_num_temporal_layers(1);             // match L1T1
+  encoding->set_active(true);
+  encoding->set_network_priority(RTCPriority::kHigh);
+  encoding->set_scalability_mode("L1T1");
 
   // 将编码参数添加到向量中
   // std::vector<RTCRtpEncodingParameters> encodings;

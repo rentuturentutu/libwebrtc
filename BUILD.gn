@@ -3,6 +3,12 @@ import("../webrtc.gni")
 declare_args() {
   libwebrtc_intel_media_sdk = false
   libwebrtc_desktop_capture = true
+  # dgj_encode: the Rust hwcodec wrapper crate (remote_desktop/rust/dgj_encode
+  # in the product repo). Built with `cargo build --release` outside this
+  # checkout; the lib dir must point at its target/release output.
+  libwebrtc_hwcodec = false
+  libwebrtc_hwcodec_lib_dir = ""
+  libwebrtc_hwcodec_vcpkg_lib_dir = ""
 }
 
 if (is_android) {
@@ -101,6 +107,8 @@ rtc_shared_library("libwebrtc") {
     "src/internal/video_capturer.cc",
     "src/internal/video_capturer.h",
     "src/libwebrtc.cc",
+    "src/internal/external_capturer.cc",
+    "src/internal/external_capturer.h",
     "src/rtc_audio_device_impl.cc",
     "src/rtc_audio_device_impl.h",
     "src/rtc_audio_source_impl.cc",
@@ -217,6 +225,7 @@ rtc_shared_library("libwebrtc") {
     "../api/video:video_frame",
     "../api/video_codecs:builtin_video_decoder_factory",
     "../api/video_codecs:builtin_video_encoder_factory",
+    "../common_video",
     "../media:rtc_audio_video",
     "../media:rtc_internal_video_codecs",
     "../media:rtc_media",
@@ -227,6 +236,8 @@ rtc_shared_library("libwebrtc") {
     "../modules/video_capture:video_capture_module",
     "../pc:libjingle_peerconnection",
     "../rtc_base:threading",
+    "../rtc_base:log_sinks",
+    "../system_wrappers:field_trial",
     "../sdk:media_constraints",
     "//third_party/abseil-cpp/absl/memory",
     "//third_party/boringssl:boringssl",
@@ -262,5 +273,65 @@ rtc_shared_library("libwebrtc") {
         "//third_party/libjpeg_turbo:libjpeg",
       ]
     }
+  }
+
+  # dgj hardware H264 (Rust hwcodec wrapper, remote_desktop/rust/dgj_encode).
+  # dgj_encode.lib is a Rust *staticlib*: cargo emits the FFmpeg / libmfx /
+  # system link directives for its own linker invocation only, so GN has to
+  # repeat them here or the DLL fails to link with LNK2019.
+  # Must stay after `deps` is assigned above -- `deps +=` on an undefined
+  # identifier is a gn error.
+  if (is_win && libwebrtc_hwcodec) {
+    assert(libwebrtc_hwcodec_lib_dir != "",
+           "libwebrtc_hwcodec_lib_dir must point at dgj_encode/target/release")
+    assert(libwebrtc_hwcodec_vcpkg_lib_dir != "",
+           "libwebrtc_hwcodec_vcpkg_lib_dir must point at vcpkg's " +
+               "x64-windows-static/lib")
+    sources += [
+      "src/dgj/dgj_encode_ffi.h",
+      "src/dgj/dgj_texture_buffer.cc",
+      "src/dgj/dgj_texture_buffer.h",
+      "src/dgj/hwcodec_video_encoder.cc",
+      "src/dgj/hwcodec_video_encoder.h",
+      "src/dgj/hwcodec_video_encoder_factory.cc",
+      "src/dgj/hwcodec_video_encoder_factory.h",
+      "src/dgj/hwcodec_video_decoder.cc",
+      "src/dgj/hwcodec_video_decoder.h",
+      "src/dgj/hwcodec_video_decoder_factory.cc",
+      "src/dgj/hwcodec_video_decoder_factory.h",
+    ]
+    defines += [ "USE_DGJ_HWCODEC" ]
+    deps += [
+      "../api/video_codecs:rtc_software_fallback_wrappers",
+      "../common_video",
+      "../modules/video_coding:webrtc_h264",
+    ]
+    libs += [
+      "dgj_encode.lib",
+      "avcodec.lib",
+      "avutil.lib",
+      "avformat.lib",
+      "libmfx.lib",
+      "d3d11.lib",
+      "dxgi.lib",
+      "ole32.lib",
+      "oleaut32.lib",
+      "bcrypt.lib",
+      "strmiids.lib",
+      "mfplat.lib",
+      "mfuuid.lib",
+      "secur32.lib",
+      "ws2_32.lib",
+
+      # Rust std itself, not FFmpeg: std::fs / std::process reach straight into
+      # ntdll (NtCreateFile, RtlNtStatusToDosError, ...) and userenv
+      # (GetUserProfileDirectoryW).
+      "ntdll.lib",
+      "userenv.lib",
+    ]
+    lib_dirs = [
+      libwebrtc_hwcodec_lib_dir,
+      libwebrtc_hwcodec_vcpkg_lib_dir,
+    ]
   }
 }

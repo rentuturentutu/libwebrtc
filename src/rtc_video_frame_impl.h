@@ -36,6 +36,8 @@ class VideoFrameBufferImpl : public RTCVideoFrame {
 
   int StrideV() const override;
 
+  void* D3D11SharedHandle() const override;
+
   int ConvertToARGB(Type type, uint8_t* dst_argb, int dst_stride_argb,
                     int dest_width, int dest_height) override;
 

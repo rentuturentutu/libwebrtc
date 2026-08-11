@@ -19,6 +19,10 @@
 #include "src/win/msdkvideodecoderfactory.h"
 #include "src/win/msdkvideoencoderfactory.h"
 #endif
+#if defined(USE_DGJ_HWCODEC)
+#include "src/dgj/hwcodec_video_decoder_factory.h"
+#include "src/dgj/hwcodec_video_encoder_factory.h"
+#endif
 #if defined(WEBRTC_IOS)
 #include "engine/sdk/objc/Framework/Classes/videotoolboxvideocodecfactory.h"
 #endif
@@ -39,6 +43,16 @@ std::unique_ptr<webrtc::VideoDecoderFactory> CreateIntelVideoDecoderFactory() {
     return webrtc::CreateBuiltinVideoDecoderFactory();
   }
   return std::make_unique<owt::base::MSDKVideoDecoderFactory>();
+}
+#endif
+
+#if defined(USE_DGJ_HWCODEC)
+std::unique_ptr<webrtc::VideoEncoderFactory> CreateDgjVideoEncoderFactory() {
+  return std::make_unique<libwebrtc::HwcodecVideoEncoderFactory>();
+}
+
+std::unique_ptr<webrtc::VideoDecoderFactory> CreateDgjVideoDecoderFactory() {
+  return std::make_unique<libwebrtc::HwcodecVideoDecoderFactory>();
 }
 #endif
 
@@ -68,7 +82,10 @@ bool RTCPeerConnectionFactoryImpl::Initialize() {
         network_thread_.get(), worker_thread_.get(), signaling_thread_.get(),
         audio_device_module_, webrtc::CreateBuiltinAudioEncoderFactory(),
         webrtc::CreateBuiltinAudioDecoderFactory(),
-#if defined(USE_INTEL_MEDIA_SDK)
+#if defined(USE_DGJ_HWCODEC)
+        CreateDgjVideoEncoderFactory(),
+        CreateDgjVideoDecoderFactory(),
+#elif defined(USE_INTEL_MEDIA_SDK)
         CreateIntelVideoEncoderFactory(), CreateIntelVideoDecoderFactory(),
 #else
         webrtc::CreateBuiltinVideoEncoderFactory(),
@@ -196,13 +213,37 @@ scoped_refptr<RTCVideoSource> RTCPeerConnectionFactoryImpl::CreateVideoSource_s(
       static_cast<RTCVideoCapturerImpl*>(capturer.get());
   /*RTCMediaConstraintsImpl* media_constraints =
           static_cast<RTCMediaConstraintsImpl*>(constraints.get());*/
+  // Screen content needs a source that reports is_screencast(), otherwise the
+  // encoder applies camera-style degradation and skips the zero-hertz cadence.
   rtc::scoped_refptr<webrtc::VideoTrackSourceInterface> rtc_source_track =
-      rtc::scoped_refptr<webrtc::VideoTrackSourceInterface>(
-          new rtc::RefCountedObject<webrtc::internal::CapturerTrackSource>(
-              capturer_impl->video_capturer()));
+      capturer_impl->IsScreencast()
+          ? rtc::scoped_refptr<webrtc::VideoTrackSourceInterface>(
+                new rtc::RefCountedObject<webrtc::internal::ExternalTrackSource>(
+                    capturer_impl->video_capturer()))
+          : rtc::scoped_refptr<webrtc::VideoTrackSourceInterface>(
+                new rtc::RefCountedObject<
+                    webrtc::internal::CapturerTrackSource>(
+                    capturer_impl->video_capturer()));
   scoped_refptr<RTCVideoSourceImpl> source = scoped_refptr<RTCVideoSourceImpl>(
       new RefCountedObject<RTCVideoSourceImpl>(rtc_source_track));
   return source;
+}
+
+scoped_refptr<RTCVideoCapturer>
+RTCPeerConnectionFactoryImpl::CreateExternalVideoCapturer(const string label,
+                                                         uint32_t width,
+                                                         uint32_t height,
+                                                         uint32_t target_fps) {
+  auto capturer = webrtc::internal::ExternalCapturer::Create(width, height,
+                                                             target_fps);
+  if (capturer == nullptr) {
+    RTC_LOG(LS_ERROR) << __FUNCTION__ << ": failed to create external capturer "
+                      << to_std_string(label);
+    return nullptr;
+  }
+
+  return scoped_refptr<RTCExternalVideoCapturerImpl>(
+      new RefCountedObject<RTCExternalVideoCapturerImpl>(capturer));
 }
 
 #ifdef RTC_DESKTOP_DEVICE

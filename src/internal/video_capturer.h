@@ -16,6 +16,7 @@
 
 #include "api/video/video_frame.h"
 #include "api/video/video_source_interface.h"
+#include "api/video_track_source_constraints.h"
 #include "media/base/video_adapter.h"
 #include "media/base/video_broadcaster.h"
 #include "modules/video_capture/video_capture.h"
@@ -40,9 +41,26 @@ class VideoCapturer : public rtc::VideoSourceInterface<VideoFrame> {
                        const rtc::VideoSinkWants& wants) override;
   void RemoveSink(rtc::VideoSinkInterface<VideoFrame>* sink) override;
 
+  // Forwards source constraints to every attached sink. Reporting
+  // {min_fps = 0, max_fps > 0} is what lets the encoder-side frame cadence
+  // adapter enter zero-hertz mode for screen content, so identical frames are
+  // not re-encoded while the desktop is idle. See
+  // FrameCadenceAdapterImpl::IsZeroHertzScreenshareEnabled().
+  void ProcessConstraints(const VideoTrackSourceConstraints& constraints);
+
  protected:
   void OnFrame(const VideoFrame& frame);
   rtc::VideoSinkWants GetSinkWants();
+
+  // Called whenever the sinks' aggregated max framerate changes. The base class
+  // only feeds it to `video_adapter_`, which drops surplus frames inside
+  // OnFrame -- by then a grabber has already paid for the acquire and the colour
+  // conversion. A subclass that owns the grabber can override this to throttle
+  // it at the source instead.
+  //
+  // `fps` is rtc::VideoSinkWants::max_framerate_fps, so it is
+  // std::numeric_limits<int>::max() when nothing constrains the rate.
+  virtual void OnMaxFramerateChanged(int fps) {}
 
  private:
   void UpdateVideoAdapter();
