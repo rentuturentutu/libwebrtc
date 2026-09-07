@@ -35,6 +35,13 @@ constexpr int64_t kVramDrainPollUs = 1000;
 // serialization to the media path; ours currently cannot.
 constexpr int64_t kVramRateHoldLogMs = 5000;
 constexpr int kVramBitrateChangePercent = 20;
+// MFX Reset is cheap in isolation but still disturbs the QSV rate controller
+// and can coincide with a 20-30ms frame interval on a live desktop. GCC's
+// target naturally walks while probing; do not reset the encoder for every
+// 20% fluctuation. Keep a 3s quiet period and require a larger 30% drift.
+constexpr int64_t kMfxRateUpdateIntervalMs = 3000;
+constexpr int kMfxBitrateChangePercent = 30;
+constexpr int kMfxBackend = 2;
 // Keep a fixed 1080p floor while GCC probes. That keeps
 // dark borders and moving text from being quantized away while GCC is still
 // probing the route. Keep the floor configurable for constrained links and
@@ -151,18 +158,24 @@ int HwcodecVideoEncoder::InitEncode(const webrtc::VideoCodec* codec_settings,
   width_ = codec_settings->width;
   height_ = codec_settings->height;
   fps_ = codec_settings->maxFramerate;
+  // InitEncode is also used to reinitialize the same encoder instance after a
+  // reconnect. A keyframe request from the new receiver must not be rejected
+  // because it arrived within the previous session's throttle window.
+  last_key_ms_ = -1000000;
+  trace_frame_sequence_ = 0;
   const int requested_start_kbps =
       ToFfiBitrate(codec_settings->startBitrate);
+  requested_kbs_ = requested_start_kbps;
   const int quality_floor_kbps = width_ >= 1920 && height_ >= 1080
                                      ? Vram1080pBitrateKbps(codec_type_)
                                      : requested_start_kbps;
   kbs_ = StableVramBitrateKbps(width_, height_, requested_start_kbps,
                                 codec_type_);
-  RTC_LOG(LS_INFO) << "[dgj-hwcodec] fixed rate policy codec="
+  RTC_LOG(LS_INFO) << "[dgj-hwcodec] initial rate policy codec="
                    << (codec_type_ == webrtc::kVideoCodecH264 ? "H264" : "H265")
                    << " requested=" << requested_start_kbps
                    << " floor=" << quality_floor_kbps << " configured=" << kbs_
-                   << " kbps runtime_reconfigure=disabled";
+                   << " kbps mfx_follows_target=1 nvenc_fixed=1";
 
   // gop = fps*3: periodic IDR as a safety net for keyframe requests that the
   // 1s throttle rejects (see hwcodec_video_encoder.h). The receiver PLI path
@@ -381,10 +394,14 @@ int32_t HwcodecVideoEncoder::Encode(
   if (frame_types && !frame_types->empty() &&
       (*frame_types)[0] == webrtc::VideoFrameType::kVideoFrameKey) {
     int64_t now = rtc::TimeMillis();
-    if (now - last_key_ms_ >= kMinForceKeyIntervalMs) {
+    const int64_t request_age_ms = now - last_key_ms_;
+    if (request_age_ms >= kMinForceKeyIntervalMs) {
       force_key = true;
       last_key_ms_ = now;
     }
+    RTC_LOG(LS_INFO) << "[dgj-keyframe] request accepted="
+                     << (force_key ? 1 : 0)
+                     << " age_ms=" << request_age_ms;
   }
 
   {
@@ -470,13 +487,19 @@ int32_t HwcodecVideoEncoder::EncodeOnWorker(
         // does mean software fallback, since then neither encoder exists.
         ReleaseVramEncoder();
         vram_unavailable_ = true;
-        if (handle_ == nullptr && !RebuildRamEncoder(fps_, kbs_)) {
+        const int fallback_kbs = StableVramBitrateKbps(
+            width_, height_, requested_kbs_, codec_type_);
+        if (handle_ == nullptr && !RebuildRamEncoder(fps_, fallback_kbs)) {
           RTC_LOG(LS_ERROR) << "[dgj-hwcodec] could not reopen the RAM encoder "
                                "after a texture failure; falling back to "
                                "software";
           return WEBRTC_VIDEO_CODEC_FALLBACK_SOFTWARE;
         }
         return WEBRTC_VIDEO_CODEC_ERROR;
+      }
+      if (force_key) {
+        RTC_LOG(LS_INFO) << "[dgj-keyframe] vram submit backend="
+                         << dgj_venc_backend(vhandle_) << " ret=" << vret;
       }
       vram_drain_at_us_ =
           rtc::TimeMicros() + VramDrainDelayUs(fps_);
@@ -498,29 +521,47 @@ int32_t HwcodecVideoEncoder::EncodeOnWorker(
         int64_t submit_us = 0, completion_us = 0, ready_us = 0;
         int64_t stage_frames = 0, submit_max_us = 0;
         int64_t completion_max_us = 0, ready_max_us = 0;
-        if (dgj_venc_stage_timing(
-                vhandle_, &submit_us, &completion_us, &ready_us,
-                &stage_frames, &submit_max_us, &completion_max_us,
-                &ready_max_us) == DGJ_OK) {
+        const int stage_ret = dgj_venc_stage_timing(
+            vhandle_, &submit_us, &completion_us, &ready_us, &stage_frames,
+            &submit_max_us, &completion_max_us, &ready_max_us);
+        if (stage_ret == DGJ_OK) {
           const int64_t d_frames = stage_frames - last_venc_stage_frames_;
           if (d_frames > 0) {
-            RTC_LOG(LS_INFO)
-                << "[dgj-nvenc-stage] over " << d_frames
-                << " frames: submit avg "
-                << ((submit_us - last_venc_submit_us_) / 1000.0 / d_frames)
-                << "ms max_window " << (submit_max_us / 1000.0)
-                << "ms | completion avg "
-                << ((completion_us - last_venc_completion_us_) / 1000.0 /
-                    d_frames)
-                << "ms max_window " << (completion_max_us / 1000.0)
-                << "ms | ready->callback avg "
-                << ((ready_us - last_venc_ready_us_) / 1000.0 / d_frames)
-                << "ms max_window " << (ready_max_us / 1000.0) << "ms";
+            const double submit_avg =
+                (submit_us - last_venc_submit_us_) / 1000.0 / d_frames;
+            const double completion_avg =
+                (completion_us - last_venc_completion_us_) / 1000.0 /
+                d_frames;
+            const double ready_avg =
+                (ready_us - last_venc_ready_us_) / 1000.0 / d_frames;
+            if (dgj_venc_backend(vhandle_) == kMfxBackend) {
+              RTC_LOG(LS_INFO)
+                  << "[dgj-mfx-stage] over " << d_frames
+                  << " frames: BGRA->NV12 avg/max " << submit_avg << "/"
+                  << (submit_max_us / 1000.0)
+                  << "ms | EncodeFrameAsync avg/max " << completion_avg << "/"
+                  << (completion_max_us / 1000.0)
+                  << "ms | SyncOperation avg/max " << ready_avg << "/"
+                  << (ready_max_us / 1000.0) << "ms";
+            } else {
+              RTC_LOG(LS_INFO)
+                  << "[dgj-nvenc-stage] over " << d_frames
+                  << " frames: submit avg " << submit_avg << "ms max_window "
+                  << (submit_max_us / 1000.0) << "ms | completion avg "
+                  << completion_avg << "ms max_window "
+                  << (completion_max_us / 1000.0)
+                  << "ms | ready->callback avg " << ready_avg
+                  << "ms max_window " << (ready_max_us / 1000.0) << "ms";
+            }
           }
           last_venc_submit_us_ = submit_us;
           last_venc_completion_us_ = completion_us;
           last_venc_ready_us_ = ready_us;
           last_venc_stage_frames_ = stage_frames;
+        } else {
+          RTC_LOG(LS_WARNING) << "[dgj-vram-stage] timing unavailable backend="
+                              << dgj_venc_backend(vhandle_)
+                              << " ret=" << stage_ret;
         }
         DgjNvencStageDetail detail = {};
         if (dgj_venc_stage_detail_timing(vhandle_, &detail) == DGJ_OK &&
@@ -667,6 +708,7 @@ void HwcodecVideoEncoder::ReleaseVramEncoder() {
   last_venc_completion_us_ = 0;
   last_venc_ready_us_ = 0;
   last_venc_stage_frames_ = 0;
+  last_vram_rate_update_ms_ = -1000000;
   vram_frames_since_log_ = 0;
   vram_drain_at_us_ = 0;
 }
@@ -721,6 +763,27 @@ bool HwcodecVideoEncoder::EnsureVramEncoder(void* device,
   vram_width_ = width;
   vram_height_ = height;
   const int backend = dgj_venc_backend(vhandle_);
+  const bool prewarmed = dgj_venc_is_prewarmed(vhandle_) == 1;
+  if (backend == kMfxBackend) {
+    const int initial_mfx_kbs = ToFfiBitrate(requested_kbs_);
+    if (initial_mfx_kbs != kbs_) {
+      const int64_t reset_start_ms = rtc::TimeMillis();
+      const int ret = dgj_venc_set_bitrate(vhandle_, initial_mfx_kbs);
+      const int64_t reset_cost_ms = rtc::TimeMillis() - reset_start_ms;
+      last_vram_rate_update_ms_ = rtc::TimeMillis();
+      if (ret == DGJ_OK) {
+        RTC_LOG(LS_INFO) << "[dgj-hwcodec] MFX initial rate reset " << kbs_
+                         << "->" << initial_mfx_kbs
+                         << " kbps cost=" << reset_cost_ms << "ms";
+        kbs_ = initial_mfx_kbs;
+      } else {
+        RTC_LOG(LS_WARNING)
+            << "[dgj-hwcodec] MFX initial rate reset failed requested="
+            << initial_mfx_kbs << " kbps ret=" << ret
+            << " cost=" << reset_cost_ms << "ms";
+      }
+    }
+  }
   int input_mode = dgj_venc_input_mode(vhandle_);
   int vbv_frames = -1;
   int async_depth = -1;
@@ -755,9 +818,12 @@ bool HwcodecVideoEncoder::EnsureVramEncoder(void* device,
   }
   RTC_LOG(LS_INFO) << "[dgj-hwcodec] vram encoder open on luid " << luid
                    << " at " << width << "x" << height << " kbs " << kbs_
+                   << " prewarmed=" << (prewarmed ? 1 : 0)
                    << " fps " << fps_ << " backend " << backend_name
                    << runtime_details
-                   << " rate_mode=fixed gop=infinite";
+                   << (backend == kMfxBackend
+                           ? " rate_mode=mfx_dynamic gop=infinite"
+                           : " rate_mode=fixed gop=infinite");
   return true;
 }
 
@@ -825,8 +891,11 @@ HwcodecVideoEncoder::TakeFrame(int64_t pts_ms) {
 
 void HwcodecVideoEncoder::TraceFrameEncoded(int64_t queue_us,
                                             int64_t enc_us,
-                                            bool force_key) {
+                                            bool force_key,
+                                            uint32_t rtp_timestamp,
+                                            int64_t capture_time_ms) {
   const int64_t total_us = queue_us + enc_us;
+  const uint64_t frame_sequence = ++trace_frame_sequence_;
   ++trace_frames_;
   trace_queue_sum_us_ += queue_us;
   trace_enc_sum_us_ += enc_us;
@@ -848,7 +917,9 @@ void HwcodecVideoEncoder::TraceFrameEncoded(int64_t queue_us,
       const int64_t rebuild_age_ms =
           last_any_rebuild_ms_ > 0 ? rtc::TimeMillis() - last_any_rebuild_ms_
                                    : -1;
-      RTC_LOG(LS_INFO) << "[dgj-trace] slow frame: queue "
+      RTC_LOG(LS_INFO) << "[dgj-trace] slow frame seq=" << frame_sequence
+                       << " rtp_ts=" << rtp_timestamp
+                       << " capture_ms=" << capture_time_ms << " queue "
                        << (queue_us / 1000.0) << "ms + encode "
                        << (enc_us / 1000.0) << "ms = " << (total_us / 1000.0)
                        << "ms | force_key=" << (force_key ? 1 : 0)
@@ -858,6 +929,14 @@ void HwcodecVideoEncoder::TraceFrameEncoded(int64_t queue_us,
   }
 
   if (trace_frames_ < kTraceWindowFrames) {
+    if (frame_sequence % 120 == 0) {
+      RTC_LOG(LS_INFO) << "[dgj-trace] sample seq=" << frame_sequence
+                       << " rtp_ts=" << rtp_timestamp
+                       << " capture_ms=" << capture_time_ms << " queue_ms="
+                       << (queue_us / 1000.0) << " encode_ms="
+                       << (enc_us / 1000.0) << " total_ms="
+                       << (total_us / 1000.0);
+    }
     return;
   }
   RTC_LOG(LS_INFO) << "[dgj-trace] over " << trace_frames_
@@ -920,25 +999,55 @@ void HwcodecVideoEncoder::ApplyRatesOnWorker(int new_fps, int new_kbs) {
     new_fps = fps_;
   }
 
-  // Keep the configured 1080p desktop quality tier on both paths. WebRTC's
-  // initial allocation is often below the tier (for example 6285 kbps), and
-  // applying it before the native texture encoder is opened causes the first
-  // NVENC session to start at that lower rate. That immediately raises QP and
-  // destroys dark edges and moving text. The same clamp used by InitEncode
-  // must also be applied to asynchronous SetRates updates.
-  new_kbs =
-      StableVramBitrateKbps(width_, height_, new_kbs, codec_type_);
+  requested_kbs_ = ToFfiBitrate(new_kbs);
 
   // `new_fps` is WebRTC's observed/content rate, not the configured capture
-  // tier. Following it made an idle desktop repeatedly reconfigure 64->2->64.
-  // Keep the configured fps. The NVENC quality tier is also fixed for the
-  // session: on this driver, in-place rate changes serialize with outstanding
-  // output and were the dominant source of visible 100-400ms frame gaps.
+  // tier. Following it made an idle desktop repeatedly reconfigure 64->2->64,
+  // so the configured fps remains fixed. Bitrate handling is backend-specific:
+  // NVENC stays fixed because its in-place reconfigure serialized with pending
+  // output, while synchronous MFX can Reset on this worker after its previous
+  // frame has completed.
   if (vhandle_ != nullptr) {
     const int64_t now_ms = rtc::TimeMillis();
+    const int backend = dgj_venc_backend(vhandle_);
+    if (backend != kMfxBackend) {
+      // NVENC keeps the configured desktop quality tier for the whole session.
+      // Its in-place reconfigure serialized with pending output and caused
+      // visible 100-400ms stalls on the tested driver.
+      new_kbs = StableVramBitrateKbps(width_, height_, requested_kbs_,
+                                      codec_type_);
+    } else {
+      // MFX Reset is cheap and runs on this worker after the previous frame has
+      // completed. Follow GCC's actual target instead of inheriting NVENC's
+      // 24Mbps floor, which made this branch a no-op on 12-24Mbps links.
+      new_kbs = requested_kbs_;
+    }
+    const int change_threshold = backend == kMfxBackend
+                                     ? kMfxBitrateChangePercent
+                                     : kVramBitrateChangePercent;
     const bool bitrate_stale =
         kbs_ > 0 &&
-        std::abs(new_kbs - kbs_) * 100 / kbs_ >= kVramBitrateChangePercent;
+        std::abs(new_kbs - kbs_) * 100 / kbs_ >= change_threshold;
+    if (backend == kMfxBackend) {
+      if (!bitrate_stale ||
+          now_ms - last_vram_rate_update_ms_ < kMfxRateUpdateIntervalMs) {
+        return;
+      }
+      const int64_t reset_start_ms = rtc::TimeMillis();
+      const int ret = dgj_venc_set_bitrate(vhandle_, new_kbs);
+      const int64_t reset_cost_ms = rtc::TimeMillis() - reset_start_ms;
+      last_vram_rate_update_ms_ = now_ms;
+      if (ret == DGJ_OK) {
+        RTC_LOG(LS_INFO) << "[dgj-hwcodec] MFX rate reset " << kbs_ << "->"
+                         << new_kbs << " kbps cost=" << reset_cost_ms << "ms";
+        kbs_ = new_kbs;
+      } else {
+        RTC_LOG(LS_WARNING)
+            << "[dgj-hwcodec] MFX rate reset failed requested=" << new_kbs
+            << " kbps ret=" << ret << " cost=" << reset_cost_ms << "ms";
+      }
+      return;
+    }
     if (bitrate_stale &&
         now_ms - last_vram_rate_update_ms_ >= kVramRateHoldLogMs) {
       RTC_LOG(LS_INFO) << "[dgj-hwcodec] vram rate hold fixed=" << kbs_
@@ -952,6 +1061,10 @@ void HwcodecVideoEncoder::ApplyRatesOnWorker(int new_fps, int new_kbs) {
   if (handle_ == nullptr) {
     return;
   }
+
+  // RAM and NVENC keep the existing 1080p quality floor. Only native MFX uses
+  // the raw WebRTC target above.
+  new_kbs = StableVramBitrateKbps(width_, height_, requested_kbs_, codec_type_);
 
   // RAM path. The bitrate cannot be changed in place: dgj_enc_set_bitrate only
   // writes AVCodecContext::bit_rate, and libmfx does not re-read it without
@@ -1044,6 +1157,15 @@ void HwcodecVideoEncoder::OnEncoded(const uint8_t* data,
   image.rotation_ = context->frame.rotation();
   image._frameType = key ? webrtc::VideoFrameType::kVideoFrameKey
                          : webrtc::VideoFrameType::kVideoFrameDelta;
+  if (context->force_key) {
+    if (key) {
+      RTC_LOG(LS_INFO) << "[dgj-keyframe] encoded requested=1 actual=1"
+                       << " bytes=" << len << " pts=" << pts_ms;
+    } else {
+      RTC_LOG(LS_ERROR) << "[dgj-keyframe] encoded requested=1 actual=0"
+                        << " bytes=" << len << " pts=" << pts_ms;
+    }
+  }
 
   if (self->codec_type_ == webrtc::kVideoCodecH264) {
     self->bitstream_parser_.ParseBitstream(image);
@@ -1057,7 +1179,8 @@ void HwcodecVideoEncoder::OnEncoded(const uint8_t* data,
   // Close the measurement attached to the packet's actual source frame.
   self->TraceFrameEncoded(context->queue_us,
                           rtc::TimeMicros() - context->encode_start_us,
-                          context->force_key);
+                          context->force_key, context->frame.rtp_timestamp(),
+                          context->frame.render_time_ms());
 
   webrtc::CodecSpecificInfo csi;
   csi.codecType = self->codec_type_;

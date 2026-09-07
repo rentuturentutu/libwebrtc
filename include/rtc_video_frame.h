@@ -53,6 +53,20 @@ class RTCVideoFrame : public RefCountInterface {
   virtual int ConvertToARGB(Type type, uint8_t* dst_argb, int dst_stride_argb,
                             int dest_width, int dest_height) = 0;
 
+  // Sender capture time mapped into the receiver's NTP clock by WebRTC. This
+  // survives RTP, jitter buffering and decode, and lets the host measure true
+  // capture-to-present latency without comparing unsynchronised wall clocks.
+  // Declared last to preserve every existing vtable slot.
+#if defined(_WIN32)
+  virtual int64_t capture_time_ms() const { return -1; }
+
+  // Same-process fast path for hardware-decoded frames. These borrowed
+  // pointers remain valid only while this frame is referenced. Renderers must
+  // fall back to D3D11SharedHandle when they cannot use the decoder device.
+  virtual void* D3D11Texture() const { return nullptr; }
+  virtual void* D3D11Device() const { return nullptr; }
+#endif
+
  protected:
   virtual ~RTCVideoFrame() {}
 };

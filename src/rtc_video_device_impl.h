@@ -7,6 +7,9 @@
 #include "rtc_base/thread.h"
 #include "rtc_video_device.h"
 #include "src/internal/external_capturer.h"
+#if defined(USE_DGJ_HWCODEC)
+#include "src/dgj/dgj_encode_ffi.h"
+#endif
 #include "src/internal/vcm_capturer.h"
 #include "src/internal/video_capturer.h"
 
@@ -82,6 +85,26 @@ class RTCExternalVideoCapturerImpl : public RTCVideoCapturerImpl {
     if (external_capturer_ != nullptr) {
       external_capturer_->SetMaxFramerateObserver(observer, user);
     }
+  }
+
+  bool PrewarmTextureEncoder(void* device, int64_t luid, int width,
+                             int height, int fps) override {
+#if defined(USE_DGJ_HWCODEC)
+    if (device == nullptr || width <= 0 || height <= 0 || fps <= 0) {
+      return false;
+    }
+    const int kbs = width >= 1920 && height >= 1080 ? 24000 : 12000;
+    return dgj_venc_prewarm(luid, device, DGJ_CODEC_H264, width, height, kbs,
+                            fps, /*gop=*/0) == DGJ_OK;
+#else
+    return false;
+#endif
+  }
+
+  void ClearTextureEncoderPrewarm() override {
+#if defined(USE_DGJ_HWCODEC)
+    dgj_venc_clear_prewarm();
+#endif
   }
 
   bool StartTestPattern() override {

@@ -127,6 +127,10 @@ class HwcodecVideoEncoder : public webrtc::VideoEncoder {
   int height_ = 0;
   int fps_ = 30;
   int kbs_ = 0;
+  // Latest unclamped WebRTC target. NVENC/RAM keep their desktop quality
+  // floor, while MFX follows this value through its cheap in-place Reset.
+  // Read and written only on the encoder worker after InitEncode.
+  int requested_kbs_ = 0;
   int64_t last_key_ms_ = -1000000;  // keyframe-request throttle, see Encode()
   // Rebuild throttle for the RAM encoder. A rebuild costs 86ms on h264_qsv at
   // 1080p, and SetRates can fire every frame, so it needs its own limiter
@@ -218,7 +222,9 @@ class HwcodecVideoEncoder : public webrtc::VideoEncoder {
   //          hwcodec upload and its synchronous GPU wait.
   void TraceFrameEncoded(int64_t queue_us,
                          int64_t enc_us,
-                         bool force_key);
+                         bool force_key,
+                         uint32_t rtp_timestamp,
+                         int64_t capture_time_ms);
 
   static constexpr int kTraceWindowFrames = 300;
   // Frames slower than this (queue + encode) get a line of their own. 25ms is
@@ -234,6 +240,7 @@ class HwcodecVideoEncoder : public webrtc::VideoEncoder {
   int trace_over_25ms_ = 0;
   int trace_over_50ms_ = 0;
   int trace_outliers_logged_ = 0;
+  uint64_t trace_frame_sequence_ = 0;
 
   // Attribution for the outliers. The three things a 400ms frame could be:
   //

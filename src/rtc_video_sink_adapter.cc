@@ -3,6 +3,9 @@
 #include "rtc_base/logging.h"
 #include "rtc_video_frame_impl.h"
 #include "rtc_video_track.h"
+#if defined(_WIN32)
+#include "system_wrappers/include/ntp_time.h"
+#endif
 
 namespace libwebrtc {
 
@@ -27,6 +30,29 @@ void VideoSinkAdapter::OnFrame(const webrtc::VideoFrame& video_frame) {
 
   frame_buffer->set_rotation(video_frame.rotation());
   frame_buffer->set_timestamp_us(video_frame.timestamp_us());
+#if defined(_WIN32)
+  int64_t capture_time_ms = video_frame.ntp_time_ms();
+  if (capture_time_ms <= 0) {
+    // Fall back to the standard abs-capture-time RTP extension. Its timestamp
+    // uses the sender/capturer clock; local_capture_clock_offset maps that
+    // clock into this receiver's NTP domain:
+    //   capture clock = local clock + offset.
+    for (const auto& packet_info : video_frame.packet_infos()) {
+      if (!packet_info.absolute_capture_time().has_value() ||
+          !packet_info.local_capture_clock_offset().has_value()) {
+        continue;
+      }
+      const int64_t remote_capture_ms =
+          webrtc::NtpTime(packet_info.absolute_capture_time()
+                              ->absolute_capture_timestamp)
+              .ToMs();
+      capture_time_ms =
+          remote_capture_ms - packet_info.local_capture_clock_offset()->ms();
+      break;
+    }
+  }
+  frame_buffer->set_capture_time_ms(capture_time_ms);
+#endif
 
   webrtc::MutexLock cs(crt_sec_.get());
   for (auto renderer : renderers_) {

@@ -92,6 +92,14 @@ class RTCVideoCapturer : public RefCountInterface {
   // consumer that was not rebuilt against the same header.
   virtual void SetMaxFramerateObserver(MaxFramerateObserver observer,
                                        void* user) {}
+
+  // Starts the default Windows H.264 texture encoder once the capture device is
+  // known. Other capturer types and platforms return false.
+  virtual bool PrewarmTextureEncoder(void* device, int64_t luid, int width,
+                                     int height, int fps) {
+    return false;
+  }
+  virtual void ClearTextureEncoderPrewarm() {}
 };
 
 

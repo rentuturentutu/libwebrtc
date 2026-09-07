@@ -131,6 +131,17 @@ void* dgj_venc_create(int64_t luid,
                       int fps,
                       int gop);
 
+int dgj_venc_prewarm(int64_t luid,
+                     void* device,
+                     int fmt,
+                     int width,
+                     int height,
+                     int kbs,
+                     int fps,
+                     int gop);
+int dgj_venc_is_prewarmed(void* handle);
+void dgj_venc_clear_prewarm();
+
 int dgj_venc_last_reason();
 
 // Active VRAM backend for diagnostics: NV=0, AMF=1, MFX=2, FFMPEG=3.

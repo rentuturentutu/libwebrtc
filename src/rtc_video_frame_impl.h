@@ -41,11 +41,22 @@ class VideoFrameBufferImpl : public RTCVideoFrame {
   int ConvertToARGB(Type type, uint8_t* dst_argb, int dst_stride_argb,
                     int dest_width, int dest_height) override;
 
+#if defined(_WIN32)
+  int64_t capture_time_ms() const override { return capture_time_ms_; }
+  void* D3D11Texture() const override;
+  void* D3D11Device() const override;
+#endif
+
   rtc::scoped_refptr<webrtc::VideoFrameBuffer> buffer() { return buffer_; }
 
   // System monotonic clock, same timebase as rtc::TimeMicros().
   int64_t timestamp_us() const { return timestamp_us_; }
   void set_timestamp_us(int64_t timestamp_us) { timestamp_us_ = timestamp_us; }
+#if defined(_WIN32)
+  void set_capture_time_ms(int64_t capture_time_ms) {
+    capture_time_ms_ = capture_time_ms;
+  }
+#endif
 
   virtual RTCVideoFrame::VideoRotation rotation() override;
 
@@ -56,6 +67,9 @@ class VideoFrameBufferImpl : public RTCVideoFrame {
  private:
   rtc::scoped_refptr<webrtc::VideoFrameBuffer> buffer_;
   int64_t timestamp_us_ = 0;
+#if defined(_WIN32)
+  int64_t capture_time_ms_ = -1;
+#endif
   webrtc::VideoRotation rotation_ = webrtc::kVideoRotation_0;
 };
 

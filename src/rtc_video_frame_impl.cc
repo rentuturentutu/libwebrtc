@@ -25,6 +25,11 @@ scoped_refptr<RTCVideoFrame> VideoFrameBufferImpl::Copy() {
   scoped_refptr<VideoFrameBufferImpl> frame =
       scoped_refptr<VideoFrameBufferImpl>(
           new RefCountedObject<VideoFrameBufferImpl>(buffer_));
+  frame->set_timestamp_us(timestamp_us_);
+#if defined(_WIN32)
+  frame->set_capture_time_ms(capture_time_ms_);
+#endif
+  frame->set_rotation(rotation_);
   return frame;
 }
 
@@ -78,6 +83,33 @@ void* VideoFrameBufferImpl::D3D11SharedHandle() const {
   const HRESULT result = resource->GetSharedHandle(&handle);
   resource->Release();
   return SUCCEEDED(result) ? handle : nullptr;
+}
+
+void* VideoFrameBufferImpl::D3D11Texture() const {
+  if (!buffer_ || buffer_->type() != webrtc::VideoFrameBuffer::Type::kNative) {
+    return nullptr;
+  }
+  auto* native = static_cast<DgjD3D11TextureBuffer*>(buffer_.get());
+  return native->texture();
+}
+
+void* VideoFrameBufferImpl::D3D11Device() const {
+  if (!buffer_ || buffer_->type() != webrtc::VideoFrameBuffer::Type::kNative) {
+    return nullptr;
+  }
+  auto* native = static_cast<DgjD3D11TextureBuffer*>(buffer_.get());
+  ID3D11Texture2D* texture = native->texture();
+  ID3D11Device* device = native->device();
+  if (texture == nullptr || device == nullptr) {
+    return nullptr;
+  }
+  ID3D11Device* texture_device = nullptr;
+  texture->GetDevice(&texture_device);
+  const bool matches = texture_device == device;
+  if (texture_device != nullptr) {
+    texture_device->Release();
+  }
+  return matches ? device : nullptr;
 }
 
 int VideoFrameBufferImpl::ConvertToARGB(Type type, uint8_t* dst_buffer,
