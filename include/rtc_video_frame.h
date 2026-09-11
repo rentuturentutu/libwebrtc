@@ -65,6 +65,16 @@ class RTCVideoFrame : public RefCountInterface {
   // fall back to D3D11SharedHandle when they cannot use the decoder device.
   virtual void* D3D11Texture() const { return nullptr; }
   virtual void* D3D11Device() const { return nullptr; }
+
+  // What D3D11Texture() holds: 0 = BGRA, 1 = the decoder's NV12 surface. For
+  // NV12, D3D11ArraySlice() selects the entry in the decode pool's texture array,
+  // and the two colour flags say how to convert it. A renderer that can consume
+  // NV12 avoids the decoder's conversion draw and the renderer-side copy. Appended
+  // last so existing vtable slots keep their positions.
+  virtual int D3D11Format() const { return 0; }
+  virtual int D3D11ArraySlice() const { return 0; }
+  virtual bool D3D11IsBt709() const { return false; }
+  virtual bool D3D11IsFullRange() const { return false; }
 #endif
 
  protected:

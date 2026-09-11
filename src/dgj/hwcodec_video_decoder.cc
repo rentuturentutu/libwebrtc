@@ -16,6 +16,26 @@ void ReleaseDecodedTexture(void* opaque) {
   static_cast<ID3D11Texture2D*>(opaque)->Release();
 }
 
+// Mirrors hwcodec's decode-side log into RTC_LOG so the per-300-frame stage and
+// D3D11 query wait statistics show up in the normal WebRTC log. Installed once;
+// the Rust side keeps its own file sink independently.
+void ForwardDecodeLog(int level, const char* message) {
+  if (message == nullptr) {
+    return;
+  }
+  switch (level) {
+    case 1:
+      RTC_LOG(LS_ERROR) << "[dgj-hwdecode] " << message;
+      break;
+    case 2:
+      RTC_LOG(LS_WARNING) << "[dgj-hwdecode] " << message;
+      break;
+    default:
+      RTC_LOG(LS_INFO) << "[dgj-hwdecode] " << message;
+      break;
+  }
+}
+
 }  // namespace
 
 HwcodecVideoDecoder::HwcodecVideoDecoder(webrtc::VideoCodecType codec_type)
@@ -32,6 +52,7 @@ bool HwcodecVideoDecoder::Configure(const Settings& settings) {
     return false;
   }
   Release();
+  dgj_vdec_set_log_callback(&ForwardDecodeLog);
   const int codec = codec_type_ == webrtc::kVideoCodecH264 ? DGJ_CODEC_H264
                                                            : DGJ_CODEC_H265;
   const char* codec_name =
@@ -65,9 +86,9 @@ int32_t HwcodecVideoDecoder::Decode(const webrtc::EncodedImage& input_image,
   }
   decode_start_ms_ = rtc::TimeMillis();
   decoded_in_call_ = 0;
-  const int ret = dgj_vdec_decode(handle_, input_image.data(),
-                                  input_image.size(),
-                                  &HwcodecVideoDecoder::OnDecoded, this);
+  const int ret = dgj_vdec_decode2(handle_, input_image.data(),
+                                   input_image.size(),
+                                   &HwcodecVideoDecoder::OnDecoded, this);
   if (ret != DGJ_OK) {
     RTC_LOG(LS_WARNING) << "[dgj-hwdecode] decode failed with " << ret
                         << ", bytes=" << input_image.size();
@@ -108,6 +129,8 @@ webrtc::VideoDecoder::DecoderInfo HwcodecVideoDecoder::GetDecoderInfo() const {
 void HwcodecVideoDecoder::OnDecoded(void* opaque,
                                     int width,
                                     int height,
+                                    int format,
+                                    int array_slice,
                                     void* user) {
   auto* self = static_cast<HwcodecVideoDecoder*>(user);
   auto* texture = static_cast<ID3D11Texture2D*>(opaque);
@@ -140,6 +163,18 @@ void HwcodecVideoDecoder::OnDecoded(void* opaque,
     texture->Release();
     return;
   }
+
+  // Colour space for the NV12 path. The bitstream often omits VUI, in which case
+  // BT.601 studio is the right default: that is what the decoder's BGRA shader
+  // conversion has always assumed, so enabling NV12 direct must not shift colours.
+  bool bt709 = false;
+  bool full_range = false;
+  if (self->current_color_space_.has_value()) {
+    const webrtc::ColorSpace& cs = *self->current_color_space_;
+    bt709 = cs.matrix() == webrtc::ColorSpace::MatrixID::kBT709;
+    full_range = cs.range() == webrtc::ColorSpace::RangeID::kFull;
+  }
+  buffer->SetD3D11Format(format, array_slice, bt709, full_range);
 
   webrtc::VideoFrame frame =
       webrtc::VideoFrame::Builder()

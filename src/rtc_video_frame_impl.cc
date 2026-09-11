@@ -37,28 +37,52 @@ int VideoFrameBufferImpl::width() const { return buffer_->width(); }
 
 int VideoFrameBufferImpl::height() const { return buffer_->height(); }
 
+const webrtc::I420BufferInterface* VideoFrameBufferImpl::EnsureI420() const {
+  if (!buffer_) {
+    return nullptr;
+  }
+  if (buffer_->type() == webrtc::VideoFrameBuffer::Type::kI420) {
+    return buffer_->GetI420();
+  }
+  // A native texture buffer has no I420 planes; GetI420() returns null for it,
+  // so dereferencing it crashed every caller that probed DataY(). ToI420()
+  // downloads and converts instead, and the result is cached because six
+  // accessors are read per frame.
+  std::lock_guard<std::mutex> guard(i420_lock_);
+  if (!i420_cache_) {
+    i420_cache_ = buffer_->ToI420();
+  }
+  return i420_cache_.get();
+}
+
 const uint8_t* VideoFrameBufferImpl::DataY() const {
-  return buffer_->GetI420()->DataY();
+  const webrtc::I420BufferInterface* i420 = EnsureI420();
+  return i420 != nullptr ? i420->DataY() : nullptr;
 }
 
 const uint8_t* VideoFrameBufferImpl::DataU() const {
-  return buffer_->GetI420()->DataU();
+  const webrtc::I420BufferInterface* i420 = EnsureI420();
+  return i420 != nullptr ? i420->DataU() : nullptr;
 }
 
 const uint8_t* VideoFrameBufferImpl::DataV() const {
-  return buffer_->GetI420()->DataV();
+  const webrtc::I420BufferInterface* i420 = EnsureI420();
+  return i420 != nullptr ? i420->DataV() : nullptr;
 }
 
 int VideoFrameBufferImpl::StrideY() const {
-  return buffer_->GetI420()->StrideY();
+  const webrtc::I420BufferInterface* i420 = EnsureI420();
+  return i420 != nullptr ? i420->StrideY() : 0;
 }
 
 int VideoFrameBufferImpl::StrideU() const {
-  return buffer_->GetI420()->StrideU();
+  const webrtc::I420BufferInterface* i420 = EnsureI420();
+  return i420 != nullptr ? i420->StrideU() : 0;
 }
 
 int VideoFrameBufferImpl::StrideV() const {
-  return buffer_->GetI420()->StrideV();
+  const webrtc::I420BufferInterface* i420 = EnsureI420();
+  return i420 != nullptr ? i420->StrideV() : 0;
 }
 
 void* VideoFrameBufferImpl::D3D11SharedHandle() const {
@@ -91,6 +115,34 @@ void* VideoFrameBufferImpl::D3D11Texture() const {
   }
   auto* native = static_cast<DgjD3D11TextureBuffer*>(buffer_.get());
   return native->texture();
+}
+
+int VideoFrameBufferImpl::D3D11Format() const {
+  if (!buffer_ || buffer_->type() != webrtc::VideoFrameBuffer::Type::kNative) {
+    return 0;
+  }
+  return static_cast<DgjD3D11TextureBuffer*>(buffer_.get())->d3d11_format();
+}
+
+int VideoFrameBufferImpl::D3D11ArraySlice() const {
+  if (!buffer_ || buffer_->type() != webrtc::VideoFrameBuffer::Type::kNative) {
+    return 0;
+  }
+  return static_cast<DgjD3D11TextureBuffer*>(buffer_.get())->array_slice();
+}
+
+bool VideoFrameBufferImpl::D3D11IsBt709() const {
+  if (!buffer_ || buffer_->type() != webrtc::VideoFrameBuffer::Type::kNative) {
+    return false;
+  }
+  return static_cast<DgjD3D11TextureBuffer*>(buffer_.get())->bt709();
+}
+
+bool VideoFrameBufferImpl::D3D11IsFullRange() const {
+  if (!buffer_ || buffer_->type() != webrtc::VideoFrameBuffer::Type::kNative) {
+    return false;
+  }
+  return static_cast<DgjD3D11TextureBuffer*>(buffer_.get())->full_range();
 }
 
 void* VideoFrameBufferImpl::D3D11Device() const {

@@ -108,6 +108,16 @@ void dgj_enc_destroy(void* handle);
 #define DGJ_CODEC_H264 0
 #define DGJ_CODEC_H265 1
 
+// Per-encoder profiles; old entry points preserve their legacy defaults.
+#define DGJ_H264_PROFILE_LEGACY 0
+#define DGJ_H264_PROFILE_CONSTRAINED_BASELINE 1
+#define DGJ_H264_PROFILE_MAIN 2
+void* dgj_enc_create_profile(const char* name, int width, int height, int kbs,
+                             int fps, int gop, int profile);
+void* dgj_venc_create_profile(int64_t luid, void* device, const char* driver,
+                              int fmt, int width, int height, int kbs, int fps,
+                              int gop, int profile);
+
 // Probe VRAM encoders. Entries are {"driver","vendor","luid","format"}; the
 // `luid` is the point of it -- only an adapter listed here can encode a texture
 // that lives on it. Result is cached inside the library. Expensive; call once.
@@ -244,6 +254,18 @@ typedef void (*DgjDecodedCb)(void* texture,
                              int height,
                              void* user);
 
+// Same as DgjDecodedCb but also reports what the texture is: `format` is 0 for
+// the decoder's converted BGRA texture and 1 for its own NV12 surface, and
+// `array_slice` indexes the NV12 decode pool (a texture array). With
+// DGJ_NV12_DIRECT=1 the decoder skips the BGRA conversion entirely, so a renderer
+// that can sample NV12 avoids a conversion draw plus a full-frame copy.
+typedef void (*DgjDecodedCb2)(void* texture,
+                              int width,
+                              int height,
+                              int format,
+                              int array_slice,
+                              void* user);
+
 int dgj_vdec_available(int codec);
 void* dgj_vdec_create(int codec);
 int dgj_vdec_backend(void* handle);
@@ -252,6 +274,24 @@ int dgj_vdec_decode(void* handle,
                     size_t len,
                     DgjDecodedCb cb,
                     void* user);
+
+int dgj_vdec_decode2(void* handle,
+                     const uint8_t* data,
+                     size_t len,
+                     DgjDecodedCb2 cb,
+                     void* user);
+
+// Decode-side diagnostics. hwcodec's C++ logs reach Rust's `log` facade; with no
+// sink installed in this DLL every record was dropped, which is why the decoder's
+// per-300-frame stage and D3D11 query wait statistics were never observable. The
+// file sink is optional (it defaults to logDir\DeskRemote\dgj_decode.log next to
+// the executable); the callback mirrors the same lines into RTC_LOG. Level
+// follows the `log` crate: 1=error, 2=warn, 3=info.
+typedef void (*DgjDecodeLogCb)(int level, const char* message);
+
+int dgj_vdec_set_log_file(const char* path);
+int dgj_vdec_set_log_callback(DgjDecodeLogCb cb);
+
 void dgj_vdec_destroy(void* handle);
 }
 

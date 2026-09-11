@@ -31,6 +31,8 @@ class HwcodecVideoDecoder final : public webrtc::VideoDecoder {
   static void OnDecoded(void* texture,
                         int width,
                         int height,
+                        int format,
+                        int array_slice,
                         void* user);
 
   void* handle_ = nullptr;

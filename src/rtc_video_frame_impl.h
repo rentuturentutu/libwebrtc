@@ -1,6 +1,8 @@
 #ifndef LIB_WEBRTC_VIDEO_FRAME_IMPL_HXX
 #define LIB_WEBRTC_VIDEO_FRAME_IMPL_HXX
 
+#include <mutex>
+
 #include "api/video/i420_buffer.h"
 #include "api/video/video_frame_buffer.h"
 #include "api/video/video_rotation.h"
@@ -45,6 +47,10 @@ class VideoFrameBufferImpl : public RTCVideoFrame {
   int64_t capture_time_ms() const override { return capture_time_ms_; }
   void* D3D11Texture() const override;
   void* D3D11Device() const override;
+  int D3D11Format() const override;
+  int D3D11ArraySlice() const override;
+  bool D3D11IsBt709() const override;
+  bool D3D11IsFullRange() const override;
 #endif
 
   rtc::scoped_refptr<webrtc::VideoFrameBuffer> buffer() { return buffer_; }
@@ -65,7 +71,15 @@ class VideoFrameBufferImpl : public RTCVideoFrame {
   void set_rotation(webrtc::VideoRotation rotation) { rotation_ = rotation; }
 
  private:
+  // A native (texture-backed) buffer has no I420 planes: GetI420() returns null
+  // for it, so the plane accessors have to go through ToI420(), which downloads
+  // and converts. The result is cached because callers read six accessors per
+  // frame and each download is a full-frame GPU readback.
+  const webrtc::I420BufferInterface* EnsureI420() const;
+
   rtc::scoped_refptr<webrtc::VideoFrameBuffer> buffer_;
+  mutable std::mutex i420_lock_;
+  mutable rtc::scoped_refptr<webrtc::I420BufferInterface> i420_cache_;
   int64_t timestamp_us_ = 0;
 #if defined(_WIN32)
   int64_t capture_time_ms_ = -1;

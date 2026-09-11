@@ -52,6 +52,25 @@ class DgjD3D11TextureBuffer : public webrtc::VideoFrameBuffer {
   // that can consume the texture without a cross-device copy.
   ID3D11Device* device() const;
 
+  // What `texture()` actually holds. 0 = BGRA (the historical contract), 1 = the
+  // decoder's NV12 surface, in which case `array_slice()` selects the plane pair
+  // inside the decode pool's texture array. `bt709()`/`full_range()` come from the
+  // bitstream colour space when present; they default to BT.601 studio, which is
+  // what the BGRA shader path has always assumed, so colours do not shift when the
+  // NV12 path is enabled.
+  int d3d11_format() const { return d3d11_format_; }
+  int array_slice() const { return array_slice_; }
+  bool bt709() const { return bt709_; }
+  bool full_range() const { return full_range_; }
+  void SetD3D11Format(int format, int array_slice, bool bt709,
+                      bool full_range) {
+    d3d11_format_ = format;
+    array_slice_ = array_slice;
+    bt709_ = bt709;
+    full_range_ = full_range;
+  }
+
+
   // Public only because rtc::RefCountedObject constructs it. Use
   // DgjTexturePool::Wrap.
   DgjD3D11TextureBuffer(rtc::scoped_refptr<DgjTexturePool> pool,
@@ -77,6 +96,10 @@ class DgjD3D11TextureBuffer : public webrtc::VideoFrameBuffer {
   const int64_t luid_;
   const int width_;
   const int height_;
+  int d3d11_format_ = 0;
+  int array_slice_ = 0;
+  bool bt709_ = false;
+  bool full_range_ = false;
 };
 
 class DgjTexturePool : public rtc::RefCountInterface {
@@ -108,7 +131,11 @@ class DgjTexturePool : public rtc::RefCountInterface {
  private:
   friend class DgjD3D11TextureBuffer;
 
+  // `array_slice` picks the entry inside a decode pool's texture array; it is 0
+  // for the ordinary single-texture BGRA case. NV12 sources are converted with
+  // NV12ToI420, BGRA ones with ARGBToI420.
   bool DownloadToI420(ID3D11Texture2D* texture,
+                      int array_slice,
                       int width,
                       int height,
                       uint8_t* dst_y,

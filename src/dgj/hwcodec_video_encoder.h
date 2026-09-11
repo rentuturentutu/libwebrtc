@@ -33,7 +33,7 @@ class HwcodecVideoEncoder : public webrtc::VideoEncoder {
  public:
   // `codec_name` is one of the names dgj_enc_probe returned ("h264_qsv").
   HwcodecVideoEncoder(std::string codec_name,
-                      webrtc::VideoCodecType codec_type);
+                      webrtc::VideoCodecType codec_type, int h264_profile = 0);
   ~HwcodecVideoEncoder() override;
 
   int InitEncode(const webrtc::VideoCodec* codec_settings,
@@ -116,6 +116,7 @@ class HwcodecVideoEncoder : public webrtc::VideoEncoder {
 
   std::string codec_name_;
   const webrtc::VideoCodecType codec_type_;
+  const int h264_profile_;
   void* handle_ = nullptr;  // dgj_enc_create result
   // QSV may return a packet one or more submissions after its source frame.
   // Keep the small number of in-flight frames keyed by packet PTS so RTP and

@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <cstdio>
+#include "api/video_codecs/h264_profile_level_id.h"
+#include "common_video/h264/h264_common.h"
 
 #include "api/video/i420_buffer.h"
 #include "api/video/video_bitrate_allocation.h"
@@ -126,8 +129,10 @@ int32_t GopFor(int fps) {
 
 
 HwcodecVideoEncoder::HwcodecVideoEncoder(std::string codec_name,
-                                         webrtc::VideoCodecType codec_type)
-    : codec_name_(std::move(codec_name)), codec_type_(codec_type) {}
+                                         webrtc::VideoCodecType codec_type,
+                                         int h264_profile)
+    : codec_name_(std::move(codec_name)), codec_type_(codec_type),
+      h264_profile_(h264_profile) {}
 
 HwcodecVideoEncoder::~HwcodecVideoEncoder() {
   Release();
@@ -180,9 +185,14 @@ int HwcodecVideoEncoder::InitEncode(const webrtc::VideoCodec* codec_settings,
   // gop = fps*3: periodic IDR as a safety net for keyframe requests that the
   // 1s throttle rejects (see hwcodec_video_encoder.h). The receiver PLI path
   // still produces an IDR immediately via the rebuild in dgj_enc_encode.
-  handle_ = dgj_enc_create(codec_name_.c_str(), width_, height_, kbs_, fps_,
-                           GopFor(fps_));
-  if (!handle_) {
+  // CB hardware is texture-first. Several FFmpeg/QSV RAM wrappers reject
+  // constrained-baseline even though the adapter's native MFX/NVENC path
+  // supports it; do not fail InitEncode before the first D3D11 frame arrives.
+  if (h264_profile_ != DGJ_H264_PROFILE_CONSTRAINED_BASELINE) {
+    handle_ = dgj_enc_create_profile(codec_name_.c_str(), width_, height_, kbs_, fps_,
+                                     GopFor(fps_), h264_profile_);
+  }
+  if (!handle_ && h264_profile_ != DGJ_H264_PROFILE_CONSTRAINED_BASELINE) {
     RTC_LOG(LS_WARNING)
         << "[dgj-hwcodec] dgj_enc_create(" << codec_name_ << ") failed; "
         << "software fallback will take over";
@@ -195,7 +205,7 @@ int HwcodecVideoEncoder::InitEncode(const webrtc::VideoCodec* codec_settings,
 
   RTC_LOG(LS_INFO) << "[dgj-hwcodec] encoder started: " << codec_name_ << " "
                    << width_ << "x" << height_ << "@" << fps_ << "fps, "
-                   << kbs_ << " kbps";
+                   << kbs_ << " kbps profile=" << h264_profile_;
   return WEBRTC_VIDEO_CODEC_OK;
 }
 
@@ -425,7 +435,8 @@ int32_t HwcodecVideoEncoder::Encode(
 int32_t HwcodecVideoEncoder::EncodeOnWorker(
     const webrtc::VideoFrame& frame,
     bool force_key) {
-  if (!handle_ && !vhandle_) {
+  if (!handle_ && !vhandle_ &&
+      h264_profile_ != DGJ_H264_PROFILE_CONSTRAINED_BASELINE) {
     return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
   }
   if (!callback_.load(std::memory_order_acquire)) {
@@ -742,9 +753,9 @@ bool HwcodecVideoEncoder::EnsureVramEncoder(void* device,
   const int ffi_codec = codec_type_ == webrtc::kVideoCodecH265
                             ? DGJ_CODEC_H265
                             : DGJ_CODEC_H264;
-  vhandle_ = dgj_venc_create(luid, device, /*driver=*/nullptr, ffi_codec,
+  vhandle_ = dgj_venc_create_profile(luid, device, /*driver=*/nullptr, ffi_codec,
                              width, height, kbs_ > 0 ? kbs_ : 5000, fps_,
-                             /*gop=*/0);
+                             /*gop=*/0, h264_profile_);
   if (vhandle_ == nullptr) {
     const int reason = dgj_venc_last_reason();
     // NO_ENCODER is permanent for this adapter, so latch it. Anything else may
@@ -839,8 +850,8 @@ bool HwcodecVideoEncoder::RebuildRamEncoder(int fps, int kbs) {
     handle_ = nullptr;
   }
   encoded_contexts_.clear();
-  handle_ = dgj_enc_create(codec_name_.c_str(), width_, height_, new_kbs,
-                           new_fps, GopFor(new_fps));
+  handle_ = dgj_enc_create_profile(codec_name_.c_str(), width_, height_, new_kbs,
+                                   new_fps, GopFor(new_fps), h264_profile_);
   if (handle_ == nullptr) {
     RTC_LOG(LS_ERROR) << "[dgj-hwcodec] rebuild failed: " << codec_name_ << " "
                       << width_ << "x" << height_ << "@" << new_fps << "fps, "
@@ -1143,6 +1154,31 @@ void HwcodecVideoEncoder::OnEncoded(const uint8_t* data,
                            "pts="
                         << pts_ms;
     return;
+  }
+
+  // Check actual SPS bytes, not just the requested driver setting. Never send
+  // Main/High bytes under a CB negotiation if a backend ignored its profile.
+  if (self->codec_type_ == webrtc::kVideoCodecH264 && self->h264_profile_ != 0) {
+    for (const auto& nalu : webrtc::H264::FindNaluIndices(data, len)) {
+      if (nalu.payload_size < 4 || (data[nalu.payload_start_offset] & 31) != 7)
+        continue;
+      const auto* sps = data + nalu.payload_start_offset;
+      char profile_hex[7];
+      std::snprintf(profile_hex, sizeof(profile_hex), "%02x%02x%02x",
+                    sps[1], sps[2], sps[3]);
+      const auto profile = webrtc::ParseH264ProfileLevelId(profile_hex);
+      const auto expected = self->h264_profile_ == DGJ_H264_PROFILE_CONSTRAINED_BASELINE
+          ? webrtc::H264Profile::kProfileConstrainedBaseline
+          : webrtc::H264Profile::kProfileMain;
+      if (!profile || profile->profile != expected) {
+        RTC_LOG(LS_ERROR) << "DUDESK_H264_PROFILE mismatch requested="
+                         << self->h264_profile_ << " sps=" << profile_hex;
+        self->RecordWorkerResult(WEBRTC_VIDEO_CODEC_FALLBACK_SOFTWARE);
+        return;
+      }
+      RTC_LOG(LS_INFO) << "DUDESK_H264_PROFILE verified requested="
+                       << self->h264_profile_ << " sps=" << profile_hex;
+    }
   }
 
   webrtc::EncodedImage image;

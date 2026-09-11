@@ -1,5 +1,7 @@
 #include "src/dgj/dgj_texture_buffer.h"
 
+#include <limits>
+
 #include "api/make_ref_counted.h"
 #include "api/video/i420_buffer.h"
 #include "rtc_base/logging.h"
@@ -54,10 +56,10 @@ rtc::scoped_refptr<webrtc::I420BufferInterface>
 DgjD3D11TextureBuffer::ToI420() {
   rtc::scoped_refptr<webrtc::I420Buffer> out =
       webrtc::I420Buffer::Create(width_, height_);
-  if (!pool_->DownloadToI420(texture_, width_, height_, out->MutableDataY(),
-                             out->StrideY(), out->MutableDataU(),
-                             out->StrideU(), out->MutableDataV(),
-                             out->StrideV())) {
+  if (!pool_->DownloadToI420(texture_, array_slice_, width_, height_,
+                             out->MutableDataY(), out->StrideY(),
+                             out->MutableDataU(), out->StrideU(),
+                             out->MutableDataV(), out->StrideV())) {
     // A black frame is a poor result, but returning null here would crash
     // callers that treat ToI420 as infallible (I420Buffer::Create never fails,
     // so much of WebRTC assumes this cannot).
@@ -144,6 +146,7 @@ rtc::scoped_refptr<DgjD3D11TextureBuffer> DgjTexturePool::Wrap(void* src,
 }
 
 bool DgjTexturePool::DownloadToI420(ID3D11Texture2D* texture,
+                                    int array_slice,
                                     int width,
                                     int height,
                                     uint8_t* dst_y,
@@ -159,6 +162,24 @@ bool DgjTexturePool::DownloadToI420(ID3D11Texture2D* texture,
 
   D3D11_TEXTURE2D_DESC desc = {};
   texture->GetDesc(&desc);
+  if (desc.Width != static_cast<UINT>(width) ||
+      desc.Height != static_cast<UINT>(height)) {
+    RTC_LOG(LS_ERROR) << "[dgj-texpool] texture geometry mismatch actual="
+                      << desc.Width << "x" << desc.Height << " frame=" << width
+                      << "x" << height;
+    return false;
+  }
+  if (desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
+      desc.Format != DXGI_FORMAT_NV12) {
+    RTC_LOG(LS_ERROR) << "[dgj-texpool] unsupported texture format "
+                      << static_cast<int>(desc.Format);
+    return false;
+  }
+  // Captured before `desc` is reshaped into the staging description below.
+  const DXGI_FORMAT src_format = desc.Format;
+  const UINT src_array_size = desc.ArraySize;
+  const UINT src_mip_levels = desc.MipLevels;
+  const UINT src_height = desc.Height;
   if (staging_ != nullptr) {
     D3D11_TEXTURE2D_DESC staging_desc = {};
     staging_->GetDesc(&staging_desc);
@@ -187,22 +208,63 @@ bool DgjTexturePool::DownloadToI420(ID3D11Texture2D* texture,
     }
   }
 
-  context_->CopyResource(staging_, texture);
+  // A hardware decode pool hands out one slice of a texture array, so the whole
+  // resource cannot be copied: sizes would not match and the wrong slice would
+  // be read.
+  if (src_array_size > 1 || array_slice > 0) {
+    if (array_slice < 0 || static_cast<UINT>(array_slice) >= src_array_size) {
+      RTC_LOG(LS_ERROR) << "[dgj-texpool] array slice " << array_slice
+                        << " out of range " << src_array_size;
+      return false;
+    }
+    context_->CopySubresourceRegion(
+        staging_, 0, 0, 0, 0, texture,
+        D3D11CalcSubresource(0, static_cast<UINT>(array_slice), src_mip_levels),
+        nullptr);
+  } else {
+    context_->CopyResource(staging_, texture);
+  }
   D3D11_MAPPED_SUBRESOURCE mapped = {};
   const HRESULT hr = context_->Map(staging_, 0, D3D11_MAP_READ, 0, &mapped);
   if (FAILED(hr)) {
     RTC_LOG(LS_ERROR) << "[dgj-texpool] Map failed " << HexHr(hr);
     return false;
   }
+  const uint64_t bytes_per_row =
+      src_format == DXGI_FORMAT_NV12 ? static_cast<uint64_t>(width)
+                                     : static_cast<uint64_t>(width) * 4u;
+  if (mapped.pData == nullptr || mapped.RowPitch < bytes_per_row ||
+      mapped.RowPitch > static_cast<UINT>((std::numeric_limits<int>::max)())) {
+    RTC_LOG(LS_ERROR) << "[dgj-texpool] invalid mapped layout format="
+                      << static_cast<int>(src_format)
+                      << " row_pitch=" << mapped.RowPitch
+                      << " minimum=" << bytes_per_row
+                      << " data=" << mapped.pData;
+    context_->Unmap(staging_, 0);
+    return false;
+  }
   // libyuv's "ARGB" is B,G,R,A in memory order, which is what
-  // DXGI_FORMAT_B8G8R8A8_UNORM holds.
-  const int result = libyuv::ARGBToI420(
-      static_cast<const uint8_t*>(mapped.pData),
-      static_cast<int>(mapped.RowPitch), dst_y, stride_y, dst_u, stride_u,
-      dst_v, stride_v, width, height);
+  // DXGI_FORMAT_B8G8R8A8_UNORM holds. An NV12 staging map is the Y plane
+  // followed by the interleaved UV plane, both at RowPitch, with UV starting one
+  // full Y plane in.
+  int result = 0;
+  if (src_format == DXGI_FORMAT_NV12) {
+    const auto* y = static_cast<const uint8_t*>(mapped.pData);
+    const uint8_t* uv = y + static_cast<size_t>(mapped.RowPitch) * src_height;
+    result = libyuv::NV12ToI420(y, static_cast<int>(mapped.RowPitch), uv,
+                                static_cast<int>(mapped.RowPitch), dst_y,
+                                stride_y, dst_u, stride_u, dst_v, stride_v,
+                                width, height);
+  } else {
+    result = libyuv::ARGBToI420(
+        static_cast<const uint8_t*>(mapped.pData),
+        static_cast<int>(mapped.RowPitch), dst_y, stride_y, dst_u, stride_u,
+        dst_v, stride_v, width, height);
+  }
   context_->Unmap(staging_, 0);
   if (result != 0) {
-    RTC_LOG(LS_ERROR) << "[dgj-texpool] ARGBToI420 failed " << result;
+    RTC_LOG(LS_ERROR) << "[dgj-texpool] to-I420 conversion failed " << result
+                      << " format=" << static_cast<int>(src_format);
     return false;
   }
   return true;

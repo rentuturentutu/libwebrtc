@@ -8,6 +8,7 @@
 
 #include "absl/strings/match.h"
 #include "api/video_codecs/builtin_video_encoder_factory.h"
+#include "api/video_codecs/h264_profile_level_id.h"
 #include "api/video_codecs/video_encoder_software_fallback_wrapper.h"
 #include "dgj_encode_ffi.h"
 #include "libwebrtc/src/dgj/hwcodec_video_encoder.h"
@@ -105,8 +106,31 @@ bool IsH264Format(const webrtc::SdpVideoFormat& format) {
   return absl::EqualsIgnoreCase(format.name, "H264");
 }
 
+bool IsMainH264PacketizationMode1(const webrtc::SdpVideoFormat& format) {
+  if (!IsH264Format(format)) {
+    return false;
+  }
+  const auto profile =
+      webrtc::ParseSdpForH264ProfileLevelId(format.parameters);
+  const auto packetization = format.parameters.find("packetization-mode");
+  return profile.has_value() &&
+         profile->profile == webrtc::H264Profile::kProfileMain &&
+         packetization != format.parameters.end() &&
+         packetization->second == "1";
+}
+
 bool IsH265Format(const webrtc::SdpVideoFormat& format) {
   return absl::EqualsIgnoreCase(format.name, "H265");
+}
+
+int HardwareH264Profile(const webrtc::SdpVideoFormat& format) {
+  if (IsMainH264PacketizationMode1(format)) return DGJ_H264_PROFILE_MAIN;
+  if (!IsH264Format(format)) return DGJ_H264_PROFILE_LEGACY;
+  const auto profile = webrtc::ParseSdpForH264ProfileLevelId(format.parameters);
+  const auto mode = format.parameters.find("packetization-mode");
+  return profile && profile->profile == webrtc::H264Profile::kProfileConstrainedBaseline &&
+         mode != format.parameters.end() && mode->second == "1"
+             ? DGJ_H264_PROFILE_CONSTRAINED_BASELINE : DGJ_H264_PROFILE_LEGACY;
 }
 
 bool H265Enabled() {
@@ -187,38 +211,64 @@ HwcodecVideoEncoderFactory::GetSupportedFormats() const {
     hw_first.emplace_back("H265");
   }
   if (!hw_h264_name_.empty()) {
-    hw_first.emplace_back("H264", webrtc::CodecParameterMap{
-                                      // The NVENC/QSV wrapper is configured for
-                                      // H.264 Main (CABAC). Advertising
-                                      // constrained-baseline here makes the
-                                      // answer select PT108 even though the
-                                      // encoder emits Main-profile SPS/PPS.
-                                      {"profile-level-id", "4d001f"},
-                                      {"packetization-mode", "1"},
-                                      {"level-asymmetry-allowed", "1"},
-                                  });
+    const auto main_format =
+        std::find_if(formats.begin(), formats.end(),
+                     [](const webrtc::SdpVideoFormat& format) {
+                       return IsMainH264PacketizationMode1(format);
+                     });
+    if (main_format != formats.end()) {
+      hw_first.push_back(*main_format);
+    } else {
+      hw_first.emplace_back(
+          "H264", webrtc::CodecParameterMap{
+                      {"profile-level-id", "4d001f"},
+                      {"packetization-mode", "1"},
+                      {"level-asymmetry-allowed", "1"},
+                  });
+    }
   }
   for (const auto& format : formats) {
-    if ((IsH264Format(format) && !hw_h264_name_.empty()) ||
+    if ((IsMainH264PacketizationMode1(format) && !hw_h264_name_.empty()) ||
         (IsH265Format(format) && !hw_h265_name_.empty())) {
-      continue;  // Hardware already advertised at the front.
+      continue;  // This exact hardware format is already at the front.
     }
+    // Keep the builtin Baseline/Constrained-Baseline formats. Mobile peers
+    // commonly advertise 42e01f but not Main; dropping every builtin H264
+    // format here previously left VP8 as the only intersection. Those formats
+    // use a per-instance CB hardware profile, with OpenH264 as a safe fallback.
+    // Main stays first for desktop peers; mode 0 remains software-only.
     hw_first.push_back(format);
   }
   return hw_first;
 }
 
+webrtc::VideoEncoderFactory::CodecSupport HwcodecVideoEncoderFactory::QueryCodecSupport(
+    const webrtc::SdpVideoFormat& format,
+    absl::optional<std::string> scalability_mode) const {
+  if (HardwareH264Profile(format) != DGJ_H264_PROFILE_LEGACY && !hw_h264_name_.empty() &&
+      (!scalability_mode || *scalability_mode == "L1T1")) {
+    return {.is_supported = true, .is_power_efficient = true};
+  }
+  if (IsH265Format(format) && !hw_h265_name_.empty()) {
+    const bool supported = !scalability_mode || *scalability_mode == "L1T1";
+    return {.is_supported = supported, .is_power_efficient = supported};
+  }
+  return builtin_->QueryCodecSupport(format, scalability_mode);
+}
+
 std::unique_ptr<webrtc::VideoEncoder> HwcodecVideoEncoderFactory::Create(
     const webrtc::Environment& env,
     const webrtc::SdpVideoFormat& format) {
-  if (IsH264Format(format) && !hw_h264_name_.empty()) {
+  const int profile = HardwareH264Profile(format);
+  if (profile != DGJ_H264_PROFILE_LEGACY && !hw_h264_name_.empty()) {
+    RTC_LOG(LS_INFO) << "DUDESK_H264_PROFILE create hardware profile=" << profile;
     // Software wrapper around the same OpenH264 encoder the builtin factory
     // would produce, so a broken hardware encoder degrades to a working
     // stream rather than a black screen.
     return webrtc::CreateVideoEncoderSoftwareFallbackWrapper(
         env, builtin_->Create(env, format),
         std::make_unique<HwcodecVideoEncoder>(hw_h264_name_,
-                                              webrtc::kVideoCodecH264),
+                                              webrtc::kVideoCodecH264, profile),
         /*prefer_temporal_support=*/false);
   }
   if (IsH265Format(format) && !hw_h265_name_.empty()) {
