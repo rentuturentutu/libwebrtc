@@ -107,6 +107,28 @@ class RTCExternalVideoCapturerImpl : public RTCVideoCapturerImpl {
 #endif
   }
 
+  bool PushFrameBGRAWithId(const uint8_t* data, int stride, int width,
+                           int height, int64_t timestamp_us,
+                           uint64_t frame_id) override {
+    return external_capturer_ != nullptr &&
+           external_capturer_->PushFrameBGRAWithId(
+               data, stride, width, height, timestamp_us, frame_id);
+  }
+
+  bool PushFrameTextureWithId(
+      void* device, void* texture, void* shared_handle, int64_t luid,
+      int width, int height, int64_t timestamp_us, void* lease,
+      TextureReleaseCallback release, uint64_t frame_id) override {
+#if defined(USE_DGJ_HWCODEC)
+    return external_capturer_ != nullptr &&
+           external_capturer_->PushFrameTextureWithId(
+               device, texture, shared_handle, luid, width, height,
+               timestamp_us, lease, release, frame_id);
+#else
+    return false;
+#endif
+  }
+
   bool StartTestPattern() override {
     return external_capturer_ != nullptr &&
            external_capturer_->StartTestPattern();

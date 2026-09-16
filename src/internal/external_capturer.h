@@ -41,6 +41,9 @@ class ExternalCapturer : public VideoCapturer {
   // arguments are inconsistent. Safe to call from any thread.
   bool PushFrameBGRA(const uint8_t* data, int stride, int width, int height,
                      int64_t timestamp_us);
+  bool PushFrameBGRAWithId(const uint8_t* data, int stride, int width,
+                           int height, int64_t timestamp_us,
+                           uint64_t frame_id);
 
   // Pushes a planar I420 frame. Returns false on invalid arguments.
   bool PushFrameI420(const uint8_t* data_y, int stride_y, const uint8_t* data_u,
@@ -59,6 +62,10 @@ class ExternalCapturer : public VideoCapturer {
                         int64_t luid, int width, int height,
                         int64_t timestamp_us, void* lease,
                         void (*release)(void*));
+  bool PushFrameTextureWithId(void* device, void* texture, void* shared_handle,
+                              int64_t luid, int width, int height,
+                              int64_t timestamp_us, void* lease,
+                              void (*release)(void*), uint64_t frame_id);
 #endif
 
 
@@ -85,7 +92,8 @@ class ExternalCapturer : public VideoCapturer {
 
  private:
   void TestPatternLoop();
-  void DeliverI420(rtc::scoped_refptr<I420Buffer> buffer, int64_t timestamp_us);
+  void DeliverI420(rtc::scoped_refptr<I420Buffer> buffer, int64_t timestamp_us,
+                   uint64_t frame_id);
 
   const size_t width_;
   const size_t height_;

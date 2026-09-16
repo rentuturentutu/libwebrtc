@@ -9,6 +9,7 @@
  */
 
 #include "src/internal/video_capturer.h"
+#include "src/internal/capture_i420_buffer.h"
 
 #include <algorithm>
 
@@ -42,7 +43,9 @@ void VideoCapturer::OnFrame(const VideoFrame& frame) {
         I420Buffer::Create(out_width, out_height);
     scaled_buffer->ScaleFrom(*frame.video_frame_buffer()->ToI420());
     broadcaster_.OnFrame(VideoFrame::Builder()
-                             .set_video_frame_buffer(scaled_buffer)
+                             .set_video_frame_buffer(libwebrtc::WithCaptureFrameId(
+                                 scaled_buffer, libwebrtc::CaptureFrameIdTag::Get(
+                                     frame.video_frame_buffer().get())))
                              .set_rotation(kVideoRotation_0)
                              .set_timestamp_us(frame.timestamp_us())
                              .set_id(frame.id())

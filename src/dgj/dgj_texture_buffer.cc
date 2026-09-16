@@ -65,7 +65,7 @@ DgjD3D11TextureBuffer::ToI420() {
     // so much of WebRTC assumes this cannot).
     webrtc::I420Buffer::SetBlack(out.get());
   }
-  return out;
+  return WithCaptureFrameId(out, CaptureFrameIdTag::Get(this));
 }
 
 // ---------------------------------------------------------------------------

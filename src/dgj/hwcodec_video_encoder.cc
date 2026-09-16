@@ -26,6 +26,10 @@ namespace {
 // Match UU's recovered minimum while still suppressing a PLI storm. RAM and
 // NVIDIA texture encoders now force an IDR without rebuilding the session.
 constexpr int64_t kMinForceKeyIntervalMs = 600;
+// An accepted asynchronous encode should normally return its IDR within one
+// or two frames. Retry if the callback never arrives, without requesting IDR
+// on every intervening frame.
+constexpr int64_t kTransitionKeyRetryUs = 250000;
 
 constexpr int64_t kRamDrainPollMs = 1;
 constexpr int64_t kRamDrainBudgetUs = 20000;
@@ -218,6 +222,14 @@ int32_t HwcodecVideoEncoder::RegisterEncodeCompleteCallback(
 int32_t HwcodecVideoEncoder::Release() {
   callback_.store(nullptr, std::memory_order_release);
   StopWorker();
+  {
+    std::lock_guard<std::mutex> lock(worker_mutex_);
+    active_input_path_ = InputPath::kUnknown;
+    input_generation_ = 0;
+    transition_key_pending_ = false;
+    transition_key_inflight_ = false;
+    transition_key_request_us_ = 0;
+  }
   encoded_contexts_.clear();
   if (handle_) {
     dgj_enc_destroy(handle_);
@@ -432,6 +444,44 @@ int32_t HwcodecVideoEncoder::Encode(
   return WEBRTC_VIDEO_CODEC_OK;
 }
 
+bool HwcodecVideoEncoder::ForceKeyForInputPath(InputPath input_path,
+                                              bool force_key,
+                                              uint64_t* input_generation) {
+  std::lock_guard<std::mutex> lock(worker_mutex_);
+  if (active_input_path_ != input_path) {
+    RTC_LOG(LS_INFO) << "[dgj-keyframe] input path changed "
+                     << (active_input_path_ == InputPath::kTexture ? "texture" :
+                         active_input_path_ == InputPath::kI420 ? "i420" : "none")
+                     << "->"
+                     << (input_path == InputPath::kTexture ? "texture" : "i420")
+                     << "; requesting IDR";
+    active_input_path_ = input_path;
+    ++input_generation_;
+    transition_key_pending_ = true;
+    transition_key_inflight_ = false;
+  }
+  *input_generation = input_generation_;
+  if (transition_key_pending_ &&
+      (!transition_key_inflight_ ||
+       rtc::TimeMicros() - transition_key_request_us_ >=
+           kTransitionKeyRetryUs)) {
+    transition_key_inflight_ = true;
+    transition_key_request_us_ = rtc::TimeMicros();
+    return true;
+  }
+  return force_key;
+}
+
+void HwcodecVideoEncoder::RetryTransitionKeyAfterFailedSubmit(
+    InputPath input_path,
+    uint64_t input_generation) {
+  std::lock_guard<std::mutex> lock(worker_mutex_);
+  if (transition_key_pending_ && active_input_path_ == input_path &&
+      input_generation_ == input_generation) {
+    transition_key_inflight_ = false;
+  }
+}
+
 int32_t HwcodecVideoEncoder::EncodeOnWorker(
     const webrtc::VideoFrame& frame,
     bool force_key) {
@@ -468,8 +518,11 @@ int32_t HwcodecVideoEncoder::EncodeOnWorker(
       // again either. Measured with both open: 50.8ms per vram encode against
       // 10.9ms for the RAM path alone.
       ReleaseRamEncoderForTexturePath();
+      uint64_t input_generation = 0;
+      force_key = ForceKeyForInputPath(InputPath::kTexture, force_key,
+                                      &input_generation);
       RememberFrame(frame, frame.render_time_ms(), queue_us, encode_start_us,
-                    force_key);
+                    force_key, InputPath::kTexture, input_generation);
       const int vret =
           dgj_venc_encode(vhandle_, tex_buffer->texture(),
                           tex_buffer->shared_handle(),
@@ -477,12 +530,16 @@ int32_t HwcodecVideoEncoder::EncodeOnWorker(
                           &HwcodecVideoEncoder::OnEncoded, this);
       if (vret == DGJ_ERR_WOULD_BLOCK) {
         TakeFrame(frame.render_time_ms());
+        RetryTransitionKeyAfterFailedSubmit(InputPath::kTexture,
+                                            input_generation);
         ++vram_busy_drops_;
         vram_drain_at_us_ = rtc::TimeMicros() + kVramDrainPollUs;
         return WEBRTC_VIDEO_CODEC_OK;
       }
       if (vret != DGJ_OK) {
         TakeFrame(frame.render_time_ms());
+        RetryTransitionKeyAfterFailedSubmit(InputPath::kTexture,
+                                            input_generation);
         RTC_LOG(LS_ERROR) << "[dgj-hwcodec] dgj_venc_encode failed with " << vret
                           << " on " << tex_buffer->width() << "x"
                           << tex_buffer->height() << " luid "
@@ -649,8 +706,11 @@ int32_t HwcodecVideoEncoder::EncodeOnWorker(
 
 
 
+  uint64_t input_generation = 0;
+  force_key = ForceKeyForInputPath(InputPath::kI420, force_key,
+                                  &input_generation);
   RememberFrame(frame, frame.render_time_ms(), queue_us, encode_start_us,
-                force_key);
+                force_key, InputPath::kI420, input_generation);
   int ret = dgj_enc_encode(handle_, buffer->DataY(), buffer->StrideY(),
                            buffer->DataU(), buffer->StrideU(),
                            buffer->DataV(), buffer->StrideV(),
@@ -658,6 +718,8 @@ int32_t HwcodecVideoEncoder::EncodeOnWorker(
                            &HwcodecVideoEncoder::OnEncoded, this);
   if (ret != DGJ_OK) {
     TakeFrame(frame.render_time_ms());
+    RetryTransitionKeyAfterFailedSubmit(InputPath::kI420,
+                                        input_generation);
     // Log the numbers the failure depends on, not just the code: the
     // conversion's preconditions relate the frame's strides to the NV12 layout
     // FFmpeg chose at open time, and neither is visible from the code alone.
@@ -875,14 +937,17 @@ void HwcodecVideoEncoder::RememberFrame(const webrtc::VideoFrame& frame,
                                         int64_t pts_ms,
                                         int64_t queue_us,
                                         int64_t encode_start_us,
-                                        bool force_key) {
+                                        bool force_key,
+                                        InputPath input_path,
+                                        uint64_t input_generation) {
   if (encoded_contexts_.size() >= kMaxEncodedContexts) {
     RTC_LOG(LS_WARNING) << "[dgj-hwcodec] dropping stale encoded context pts="
                         << encoded_contexts_.front().pts_ms;
     encoded_contexts_.pop_front();
   }
   encoded_contexts_.push_back(
-      EncodedFrameContext{pts_ms, frame, queue_us, encode_start_us, force_key});
+      EncodedFrameContext{pts_ms, frame, queue_us, encode_start_us, force_key,
+                          input_path, input_generation});
 }
 
 std::optional<HwcodecVideoEncoder::EncodedFrameContext>
@@ -1228,7 +1293,29 @@ void HwcodecVideoEncoder::OnEncoded(const uint8_t* data,
     csi.codecSpecific.H264.base_layer_sync = false;
   }
 
-  callback->OnEncodedImage(image, &csi);
+  const auto result = callback->OnEncodedImage(image, &csi);
+  std::lock_guard<std::mutex> lock(self->worker_mutex_);
+  if (self->active_input_path_ == context->input_path &&
+      self->input_generation_ == context->input_generation &&
+      self->transition_key_pending_) {
+    if (key && result.error == webrtc::EncodedImageCallback::Result::OK) {
+      self->transition_key_pending_ = false;
+      self->transition_key_inflight_ = false;
+      RTC_LOG(LS_INFO) << "[dgj-keyframe] input path IDR confirmed "
+                       << (context->input_path == InputPath::kTexture
+                               ? "texture"
+                               : "i420")
+                       << " pts=" << pts_ms;
+    } else if (context->force_key) {
+      self->transition_key_inflight_ = false;
+      RTC_LOG(LS_WARNING) << "[dgj-keyframe] input path IDR retry "
+                          << (context->input_path == InputPath::kTexture
+                                  ? "texture"
+                                  : "i420")
+                          << " key=" << key
+                          << " send_error=" << result.error;
+    }
+  }
 }
 
 }  // namespace libwebrtc

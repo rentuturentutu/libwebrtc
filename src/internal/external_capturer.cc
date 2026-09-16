@@ -1,4 +1,5 @@
 #include "src/internal/external_capturer.h"
+#include "src/internal/capture_i420_buffer.h"
 
 #include <algorithm>
 #include <chrono>
@@ -53,17 +54,25 @@ void ExternalCapturer::StopCapture() {
 }
 
 void ExternalCapturer::DeliverI420(rtc::scoped_refptr<I420Buffer> buffer,
-                                   int64_t timestamp_us) {
+                                   int64_t timestamp_us, uint64_t frame_id) {
   OnFrame(VideoFrame::Builder()
-              .set_video_frame_buffer(buffer)
+              .set_video_frame_buffer(libwebrtc::WithCaptureFrameId(buffer, frame_id))
               .set_rotation(kVideoRotation_0)
               .set_timestamp_us(timestamp_us > 0 ? timestamp_us
                                                  : rtc::TimeMicros())
+              .set_id(static_cast<uint16_t>(frame_id))
               .build());
 }
 
 bool ExternalCapturer::PushFrameBGRA(const uint8_t* data, int stride, int width,
                                      int height, int64_t timestamp_us) {
+  return PushFrameBGRAWithId(data, stride, width, height, timestamp_us, 0);
+}
+
+bool ExternalCapturer::PushFrameBGRAWithId(const uint8_t* data, int stride,
+                                           int width, int height,
+                                           int64_t timestamp_us,
+                                           uint64_t frame_id) {
   if (!capturing_ || data == nullptr || width <= 0 || height <= 0) {
     return false;
   }
@@ -109,7 +118,7 @@ bool ExternalCapturer::PushFrameBGRA(const uint8_t* data, int stride, int width,
     bgra_conv_us_max_ = 0;
   }
 
-  DeliverI420(buffer, timestamp_us);
+  DeliverI420(buffer, timestamp_us, frame_id);
   return true;
 }
 
@@ -129,7 +138,7 @@ bool ExternalCapturer::PushFrameI420(const uint8_t* data_y, int stride_y,
     return false;
   }
 
-  DeliverI420(buffer, timestamp_us);
+  DeliverI420(buffer, timestamp_us, 0);
   return true;
 }
 
@@ -139,6 +148,14 @@ bool ExternalCapturer::PushFrameTexture(void* device, void* texture,
                                        int width, int height,
                                        int64_t timestamp_us, void* lease,
                                        void (*release)(void*)) {
+  return PushFrameTextureWithId(device, texture, shared_handle, luid, width,
+                                height, timestamp_us, lease, release, 0);
+}
+
+bool ExternalCapturer::PushFrameTextureWithId(
+    void* device, void* texture, void* shared_handle, int64_t luid, int width,
+    int height, int64_t timestamp_us, void* lease, void (*release)(void*),
+    uint64_t frame_id) {
   if (!capturing_ || device == nullptr || texture == nullptr || width <= 0 ||
       height <= 0 || lease == nullptr || release == nullptr) {
     return false;
@@ -167,11 +184,13 @@ bool ExternalCapturer::PushFrameTexture(void* device, void* texture,
     return false;
   }
 
+  buffer->SetCaptureFrameId(frame_id);
   OnFrame(VideoFrame::Builder()
               .set_video_frame_buffer(buffer)
               .set_rotation(kVideoRotation_0)
               .set_timestamp_us(timestamp_us > 0 ? timestamp_us
                                                  : rtc::TimeMicros())
+              .set_id(static_cast<uint16_t>(frame_id & 0xffffu))
               .build());
 
   // Every 300 frames, matching the other periodic logs.

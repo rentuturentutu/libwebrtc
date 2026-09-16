@@ -100,6 +100,21 @@ class RTCVideoCapturer : public RefCountInterface {
     return false;
   }
   virtual void ClearTextureEncoderPrewarm() {}
+
+  // Optional diagnostic variants carrying the capture-side frame id. Kept at
+  // the end of the interface so older consumers retain their vtable layout.
+  virtual bool PushFrameBGRAWithId(const uint8_t* data, int stride, int width,
+                                   int height, int64_t timestamp_us,
+                                   uint64_t frame_id) {
+    return PushFrameBGRA(data, stride, width, height, timestamp_us);
+  }
+  virtual bool PushFrameTextureWithId(
+      void* device, void* texture, void* shared_handle, int64_t luid,
+      int width, int height, int64_t timestamp_us, void* lease,
+      TextureReleaseCallback release, uint64_t frame_id) {
+    return PushFrameTexture(device, texture, shared_handle, luid, width, height,
+                            timestamp_us, lease, release);
+  }
 };
 
 

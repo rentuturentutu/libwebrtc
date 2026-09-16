@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -48,6 +49,8 @@ class HwcodecVideoEncoder : public webrtc::VideoEncoder {
   EncoderInfo GetEncoderInfo() const override;
 
  private:
+  enum class InputPath { kUnknown, kTexture, kI420 };
+
   struct PendingFrame {
     webrtc::VideoFrame frame;
     bool force_key;
@@ -60,6 +63,8 @@ class HwcodecVideoEncoder : public webrtc::VideoEncoder {
     int64_t queue_us;
     int64_t encode_start_us;
     bool force_key;
+    InputPath input_path;
+    uint64_t input_generation;
   };
 
   static void OnEncoded(const uint8_t* data,
@@ -78,8 +83,15 @@ class HwcodecVideoEncoder : public webrtc::VideoEncoder {
                      int64_t pts_ms,
                      int64_t queue_us,
                      int64_t encode_start_us,
-                     bool force_key);
+                     bool force_key,
+                     InputPath input_path,
+                     uint64_t input_generation);
   std::optional<EncodedFrameContext> TakeFrame(int64_t pts_ms);
+  bool ForceKeyForInputPath(InputPath input_path,
+                            bool force_key,
+                            uint64_t* input_generation);
+  void RetryTransitionKeyAfterFailedSubmit(InputPath input_path,
+                                           uint64_t input_generation);
 
   // Opens (or reopens) the VRAM encoder for `luid`/`device`. False means this
   // frame must take the I420 path.
@@ -147,6 +159,13 @@ class HwcodecVideoEncoder : public webrtc::VideoEncoder {
   std::thread worker_;
   std::mutex worker_mutex_;
   std::condition_variable worker_cv_;
+  // A backend switch invalidates the decoder's reference chain even when the
+  // old texture encoder is reused. Keep asking for IDR until one is encoded.
+  InputPath active_input_path_ = InputPath::kUnknown;
+  uint64_t input_generation_ = 0;
+  bool transition_key_pending_ = false;
+  bool transition_key_inflight_ = false;
+  int64_t transition_key_request_us_ = 0;
   bool worker_stop_ = false;
   std::optional<PendingFrame> pending_frame_;
   bool pending_rates_ = false;
@@ -245,7 +264,7 @@ class HwcodecVideoEncoder : public webrtc::VideoEncoder {
 
   // Attribution for the outliers. The three things a 400ms frame could be:
   //
-  //   force_key   a PLI arrived, so this frame was encoded as an IDR.
+  //   force_key   a PLI or input-backend transition requested an IDR.
   //   rebuild_age how long since the last RAM bitrate rebuild. SetRates uses a
   //               40% drift threshold and an 8s throttle, so a value near that
   //               bound identifies the trigger.

@@ -19,6 +19,8 @@
 
 #include <cstdint>
 #include <mutex>
+#include <memory>
+#include "src/internal/capture_i420_buffer.h"
 
 #include "api/scoped_refptr.h"
 #include "api/video/video_frame_buffer.h"
@@ -42,6 +44,14 @@ class DgjD3D11TextureBuffer : public webrtc::VideoFrameBuffer {
   // of this class -- but it must work, because the software fallback wrapper, the
   // quality scaler and the JPEG thumbnail path all reach for it.
   rtc::scoped_refptr<webrtc::I420BufferInterface> ToI420() override;
+  rtc::scoped_refptr<webrtc::VideoFrameBuffer> CropAndScale(
+      int x, int y, int w, int h, int out_w, int out_h) override {
+    return ToI420()->CropAndScale(x, y, w, h, out_w, out_h);
+  }
+  void SetCaptureFrameId(uint64_t id) {
+    capture_id_.reset();
+    if (id) capture_id_ = std::make_unique<CaptureFrameIdTag>(this, id);
+  }
 
   // For the encoder: the raw texture and the adapter it lives on. The encoder
   // MUST compare `luid()` against its own before using `texture()`.
@@ -100,6 +110,7 @@ class DgjD3D11TextureBuffer : public webrtc::VideoFrameBuffer {
   int array_slice_ = 0;
   bool bt709_ = false;
   bool full_range_ = false;
+  std::unique_ptr<CaptureFrameIdTag> capture_id_;
 };
 
 class DgjTexturePool : public rtc::RefCountInterface {

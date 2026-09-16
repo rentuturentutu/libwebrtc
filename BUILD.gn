@@ -1,5 +1,19 @@
 import("../webrtc.gni")
 
+rtc_executable("capture_frame_id_test") {
+  testonly = true
+  sources = [
+    "src/internal/capture_frame_id.h",
+    "src/internal/capture_frame_id_test.cc",
+    "src/internal/capture_i420_buffer.h",
+  ]
+  include_dirs = [ "." ]
+  deps = [
+    "//api/video:video_frame",
+    "//rtc_base:refcount",
+  ]
+}
+
 declare_args() {
   libwebrtc_intel_media_sdk = false
   libwebrtc_desktop_capture = true
@@ -109,6 +123,8 @@ rtc_shared_library("libwebrtc") {
     "src/libwebrtc.cc",
     "src/internal/external_capturer.cc",
     "src/internal/external_capturer.h",
+    "src/internal/capture_frame_id.h",
+    "src/internal/capture_i420_buffer.h",
     "src/rtc_audio_device_impl.cc",
     "src/rtc_audio_device_impl.h",
     "src/rtc_audio_source_impl.cc",
@@ -307,7 +323,9 @@ rtc_shared_library("libwebrtc") {
       "../modules/video_coding:webrtc_h264",
     ]
     libs += [
-      "dgj_encode.lib",
+      # A full file path makes Ninja track the Rust archive as a link input.
+      # A bare library name only adds a linker flag and can leave a stale DLL.
+      "$libwebrtc_hwcodec_lib_dir/dgj_encode.lib",
       "avcodec.lib",
       "avutil.lib",
       "avformat.lib",
