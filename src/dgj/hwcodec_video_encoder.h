@@ -140,8 +140,9 @@ class HwcodecVideoEncoder : public webrtc::VideoEncoder {
   int height_ = 0;
   int fps_ = 30;
   int kbs_ = 0;
-  // Latest unclamped WebRTC target. NVENC/RAM keep their desktop quality
-  // floor, while MFX follows this value through its cheap in-place Reset.
+  // Latest unclamped WebRTC target. MFX follows this value through its cheap
+  // in-place Reset; VRAM backends apply it only after their in-flight output
+  // has drained so a rate change cannot serialize with pending encode work.
   // Read and written only on the encoder worker after InitEncode.
   int requested_kbs_ = 0;
   int64_t last_key_ms_ = -1000000;  // keyframe-request throttle, see Encode()
